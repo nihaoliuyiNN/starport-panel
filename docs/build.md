@@ -86,9 +86,16 @@ $env:GOOS="linux"; $env:GOARCH="amd64"; $env:CGO_ENABLED="0"
 go build -ldflags "-s -w -X main.version=v1.0.1" -o dist/starport-agent ./cmd/starport-agent
 ```
 
-### 一条命令发版（GitHub Release）
+### 发版（GitHub Release）
 
-`scripts/publish-release.ps1` 把 UI 构建、面板 + agent 交叉编译、建 Release、传附件、校验直链一起做完：
+推 tag 就行，`.github/workflows/release.yml` 在 GitHub 上编译、跑测试、建 Release、挂附件：
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0        # 几分钟后 Release 页面出现附件
+git tag v0.1.0-rc1 && git push origin v0.1.0-rc1 # 带 "-" 的 tag 标为 pre-release，不会成为 latest
+```
+
+Actions 跑不了（比如没网权限）时，本地兜底 `scripts/publish-release.ps1`，做的事一样，另外多一步从直链下回来校验 sha256：
 
 ```powershell
 cd scripts

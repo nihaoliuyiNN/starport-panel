@@ -1,0 +1,73 @@
+# 推 v* tag 即发版：构建 UI → 交叉编译面板 / agent → 建 GitHub Release 并挂附件。
+# 附件名与 scripts/install-*.sh 里的下载路径一一对应，改名要一起改。
+# tag 含 "-"（如 v0.1.0-rc1）标为 pre-release，不会成为 releases/latest。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Web UI
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build binaries
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF_NAME}"
+          LD="-s -w -X main.version=${V}"
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 go build -ldflags "${LD}" -o dist/starport-panel-linux-amd64 ./cmd/starport-panel
+          GOOS=linux GOARCH=amd64 go build -ldflags "${LD}" -o dist/starport-agent-linux-amd64 ./cmd/starport-agent
+          GOOS=linux GOARCH=arm64 go build -ldflags "${LD}" -o dist/starport-agent-linux-arm64 ./cmd/starport-agent
+          # 安装脚本转 LF（仓库在 Windows 上提交过，保险起见）
+          for f in install-starport-panel.sh install-starport-agent.sh; do
+            sed 's/\r$//' "scripts/${f}" > "dist/${f}"
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -l dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            一行安装（面板机器）：
+            ```
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install-starport-panel.sh | bash
+            ```
+            节点：
+            ```
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install-starport-agent.sh | \
+              STARPORT_SERVER_URL=http://<面板>:8080 STARPORT_BOOTSTRAP_TOKEN=<引导令牌> bash
+            ```
+            附件 sha256 见 SHA256SUMS。

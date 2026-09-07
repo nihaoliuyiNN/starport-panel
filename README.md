@@ -37,7 +37,7 @@ curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/latest/downlo
 
 几秒后面板「节点」页应该看到它在线。
 
-想钉版本加 `STARPORT_VERSION=v0.1.0`；想用自己编的二进制加 `STARPORT_PANEL_BIN_URL` / `STARPORT_AGENT_BIN_URL`。自己编：`make ui && make agent-linux`，面板用 `GOOS=linux go build ./cmd/starport-panel`。发版走 `scripts/publish-release.ps1`，它把编译、建 GitHub Release、传附件、校验直链一起做完。
+想钉版本加 `STARPORT_VERSION=v0.1.0`；想用自己编的二进制加 `STARPORT_PANEL_BIN_URL` / `STARPORT_AGENT_BIN_URL`。自己编：`make ui && make agent-linux`，面板用 `GOOS=linux go build ./cmd/starport-panel`。发版就是推 tag：`git tag v0.1.0 && git push origin v0.1.0`，Actions 负责编译和挂附件。
 
 **3. 建集群**
 
