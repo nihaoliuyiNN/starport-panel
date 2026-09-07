@@ -64,17 +64,23 @@ if [[ -z "$BIN_URL" ]]; then
   fi
 fi
 
-dl() { # dl <url> <dest>：带进度条，连接超时 15s，失败重试 3 次
-  if command -v curl >/dev/null 2>&1; then curl -fL# --connect-timeout 15 --retry 3 "$1" -o "$2"
+dl() { # dl <url> <dest>：带进度条，连接超时 15s，失败重试 3 次；强制 HTTP/1.1 规避劣质链路上的 HTTP/2 帧错误
+  if command -v curl >/dev/null 2>&1; then curl -fL# --http1.1 --connect-timeout 15 --retry 3 "$1" -o "$2"
   elif command -v wget >/dev/null 2>&1; then wget --show-progress -qO "$2" "$1"
   else echo "缺少 curl/wget" >&2; exit 1; fi
 }
 
 echo "[install] 下载 starport-agent: $BIN_URL"
-tmp="$(mktemp)"
+mkdir -p "$(dirname "$BIN_PATH")"
+tmp="$BIN_PATH.download"
 dl "$BIN_URL" "$tmp"
-install -m 0755 "$tmp" "$BIN_PATH"
-rm -f "$tmp"
+chmod 0755 "$tmp"
+if ! "$tmp" --version >/dev/null 2>&1; then
+  echo "下载的文件不是可执行的 starport-agent（$(stat -c %s "$tmp") 字节）" >&2
+  rm -f "$tmp"; exit 1
+fi
+# 已在运行的旧 agent 会被 systemctl restart 接管新二进制
+mv -f "$tmp" "$BIN_PATH"
 mkdir -p "$DATA_DIR"
 echo "[install] 已安装 $BIN_PATH（$("$BIN_PATH" --version 2>/dev/null || echo 版本未知)）"
 

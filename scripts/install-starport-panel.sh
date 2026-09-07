@@ -76,18 +76,23 @@ if [[ -n "$TLS_CERT" || -n "$TLS_KEY" ]]; then
   [[ -r "$TLS_CERT" && -r "$TLS_KEY" ]] || { echo "证书/私钥文件不可读" >&2; exit 1; }
 fi
 
-dl() { # dl <url> <dest>：带进度条，连接超时 15s，失败重试 3 次
-  if command -v curl >/dev/null 2>&1; then curl -fL# --connect-timeout 15 --retry 3 "$1" -o "$2"
+dl() { # dl <url> <dest>：带进度条，连接超时 15s，失败重试 3 次；强制 HTTP/1.1 规避劣质链路上的 HTTP/2 帧错误
+  if command -v curl >/dev/null 2>&1; then curl -fL# --http1.1 --connect-timeout 15 --retry 3 "$1" -o "$2"
   elif command -v wget >/dev/null 2>&1; then wget --show-progress -qO "$2" "$1"
   else echo "缺少 curl/wget" >&2; exit 1; fi
 }
 
 echo "[install] 下载 starport-panel: $BIN_URL"
-tmp="$(mktemp)"
+# 下到目标目录旁边再校验：/tmp 可能 noexec，且 mktemp 出来的文件没有执行位
+mkdir -p "$(dirname "$BIN_PATH")"
+tmp="$BIN_PATH.download"
 dl "$BIN_URL" "$tmp"
-"$tmp" version >/dev/null 2>&1 || { echo "下载的文件不是可执行的 starport-panel" >&2; rm -f "$tmp"; exit 1; }
-install -m 0755 "$tmp" "$BIN_PATH"
-rm -f "$tmp"
+chmod 0755 "$tmp"
+if ! "$tmp" version >/dev/null 2>&1; then
+  echo "下载的文件不是可执行的 starport-panel（$(stat -c %s "$tmp") 字节，开头：$(head -c 64 "$tmp" | tr -cd '[:print:]' | head -c 64)）" >&2
+  rm -f "$tmp"; exit 1
+fi
+mv -f "$tmp" "$BIN_PATH"
 mkdir -p "$DATA_DIR" "$CONF_DIR"
 echo "[install] 已安装 $BIN_PATH（$("$BIN_PATH" version)）"
 

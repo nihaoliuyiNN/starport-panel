@@ -31,7 +31,7 @@ curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/latest/downlo
 curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/latest/download/install-starport-panel.sh | STARPORT_WITH_AGENT=1 bash
 ```
 
-国内机器连 GitHub 慢的话，给脚本地址和 `STARPORT_GH_PROXY` 都加一个 GitHub 加速前缀（任选一个可用的，下面以 `https://ghfast.top/` 为例）；「纳管节点」弹窗里也有同样的输入框：
+curl 报 `Error in the HTTP2 framing layer` 是链路问题，给它加 `--http1.1` 即可（脚本内部的下载已经这么做了）。国内机器连 GitHub 慢的话，给脚本地址和 `STARPORT_GH_PROXY` 都加一个 GitHub 加速前缀（任选一个可用的，下面以 `https://ghfast.top/` 为例）；「纳管节点」弹窗里也有同样的输入框：
 
 ```bash
 curl -fsSL https://ghfast.top/https://github.com/nihaoliuyiNN/starport-panel/releases/latest/download/install-starport-panel.sh | STARPORT_GH_PROXY=https://ghfast.top/ bash
@@ -40,7 +40,7 @@ curl -fsSL https://ghfast.top/https://github.com/nihaoliuyiNN/starport-panel/rel
 `latest` 只指向正式版。要装某个具体版本（包括 `-rc` 预发布版），把 `latest/download` 换成 `download/<tag>` 并加 `STARPORT_VERSION=<tag>`：
 
 ```bash
-curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/download/v0.1.0-rc2/install-starport-panel.sh | STARPORT_VERSION=v0.1.0-rc2 bash
+curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/download/v0.1.2/install-starport-panel.sh | STARPORT_VERSION=v0.1.2 bash
 ```
 
 节点要能访问面板的 8080 和 9192；节点没外网就得先用 `scripts/build-k8s-bundle.sh` 打离线包。TLS、备份、离线包、钉版本、自己编二进制、发版（推 tag 即可）见 [docs/build.md](docs/build.md)；接口见 [docs/api.md](docs/api.md)。
