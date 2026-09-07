@@ -2,27 +2,29 @@
 #
 # install-starport-agent.sh — 在一台 Linux 机器上安装并常驻 starport-agent（节点侧代理）。
 #
-# 设计：脚本本身托管在 Gitee（raw 或 releases 附件），ECS 上一条命令即可拉起——脚本再从
-# Gitee 下载 starport-agent 二进制、装到 /usr/local/bin、写 systemd 单元并 enable --now。
+# 脚本与二进制都挂在 GitHub Release 上，节点上一条命令拉起：下载 starport-agent、装到 /usr/local/bin、
+# 写 systemd 单元并 enable --now。
 #
-# 用法（在 ECS 上，需 root）：
-#   curl -fsSL https://gitee.com/<用户>/<仓库>/raw/master/install-starport-agent.sh | \
+# 用法（需 root）：
+#   curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/latest/download/install-starport-agent.sh | \
 #     STARPORT_SERVER_URL=http://panel.example.com:8080 \
 #     STARPORT_BOOTSTRAP_TOKEN=<引导令牌> \
-#     STARPORT_AGENT_BIN_URL=https://gitee.com/<用户>/<仓库>/raw/master/starport-agent \
 #     bash
 #
 # 也可先下载脚本再带参数跑：
-#   ./install-starport-agent.sh --server http://... --token <t> --bin-url https://.../starport-agent
+#   ./install-starport-agent.sh --server http://... --token <t> [--version v0.1.0] [--bin-url https://.../starport-agent]
 #
 # 环境变量（命令行同名参数优先）：
 #   STARPORT_SERVER_URL       面板地址（如 http://panel.example.com:8080）        必填
 #   STARPORT_BOOTSTRAP_TOKEN  引导令牌（面板 --bootstrap-token）                     必填
-#   STARPORT_AGENT_BIN_URL    starport-agent 二进制的 Gitee 直链                      必填
+#   STARPORT_VERSION          要装的版本（Release tag），默认 latest
+#   STARPORT_AGENT_BIN_URL    二进制下载地址；默认从 GitHub Release 取 starport-agent-linux-<arch>
 #   STARPORT_DATA_DIR         身份/临时目录，默认 /var/lib/starport-agent
 #
 set -euo pipefail
 
+REPO="${STARPORT_REPO:-nihaoliuyiNN/starport-panel}"
+VERSION="${STARPORT_VERSION:-latest}"
 SERVER="${STARPORT_SERVER_URL:-}"
 TOKEN="${STARPORT_BOOTSTRAP_TOKEN:-}"
 BIN_URL="${STARPORT_AGENT_BIN_URL:-}"
@@ -35,6 +37,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --server)   SERVER="$2"; shift 2 ;;
     --token)    TOKEN="$2"; shift 2 ;;
+    --version)  VERSION="$2"; shift 2 ;;
     --bin-url)  BIN_URL="$2"; shift 2 ;;
     --data-dir) DATA_DIR="$2"; shift 2 ;;
     *) echo "未知参数: $1" >&2; exit 2 ;;
@@ -45,7 +48,18 @@ done
 [[ $EUID -eq 0 ]] || { echo "需 root 运行（starport-agent 装机阶段要写系统盘）" >&2; exit 1; }
 [[ -n "$SERVER"  ]] || { echo "缺少 --server / STARPORT_SERVER_URL" >&2; exit 1; }
 [[ -n "$TOKEN"   ]] || { echo "缺少 --token / STARPORT_BOOTSTRAP_TOKEN" >&2; exit 1; }
-[[ -n "$BIN_URL" ]] || { echo "缺少 --bin-url / STARPORT_AGENT_BIN_URL（starport-agent Gitee 直链）" >&2; exit 1; }
+if [[ -z "$BIN_URL" ]]; then
+  case "$(uname -m)" in
+    x86_64|amd64)  arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) echo "不支持的架构 $(uname -m)；请自行编译并用 --bin-url 指定" >&2; exit 1 ;;
+  esac
+  if [[ "$VERSION" == "latest" ]]; then
+    BIN_URL="https://github.com/$REPO/releases/latest/download/starport-agent-linux-$arch"
+  else
+    BIN_URL="https://github.com/$REPO/releases/download/$VERSION/starport-agent-linux-$arch"
+  fi
+fi
 
 dl() { # dl <url> <dest>：优先 curl，回退 wget
   if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"

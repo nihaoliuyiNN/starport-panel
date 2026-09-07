@@ -6,12 +6,13 @@
 # enable --now，最后签发第一枚 API 令牌打印出来。重复执行会保留已有 env（含引导令牌），只更新二进制。
 #
 # 用法（需 root）：
-#   STARPORT_PANEL_BIN_URL=https://.../starport-panel bash install-starport-panel.sh
-#   ./install-starport-panel.sh --bin-url https://.../starport-panel [--http :8080] [--grpc :9192] \
+#   curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/latest/download/install-starport-panel.sh | bash
+#   ./install-starport-panel.sh [--version v0.1.0] [--bin-url https://.../starport-panel] [--http :8080] [--grpc :9192] \
 #       [--bootstrap-token <t>] [--tls-cert /path/fullchain.pem --tls-key /path/privkey.pem] [--grpc-endpoints panel.example.com:9192]
 #
 # 环境变量（命令行同名参数优先）：
-#   STARPORT_PANEL_BIN_URL     starport-panel 二进制下载地址        必填
+#   STARPORT_VERSION           要装的版本（Release tag），默认 latest
+#   STARPORT_PANEL_BIN_URL     二进制下载地址；默认从 GitHub Release 取 starport-panel-linux-<arch>
 #   STARPORT_HTTP_ADDR         HTTP 监听，默认 :8080
 #   STARPORT_GRPC_ADDR         gRPC 监听，默认 :9192
 #   STARPORT_BOOTSTRAP_TOKEN   agent 引导令牌；空则随机生成
@@ -21,6 +22,8 @@
 #
 set -euo pipefail
 
+REPO="${STARPORT_REPO:-nihaoliuyiNN/starport-panel}"
+VERSION="${STARPORT_VERSION:-latest}"
 BIN_URL="${STARPORT_PANEL_BIN_URL:-}"
 HTTP_ADDR="${STARPORT_HTTP_ADDR:-:8080}"
 GRPC_ADDR="${STARPORT_GRPC_ADDR:-:9192}"
@@ -36,6 +39,7 @@ SVC="starport-panel"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --version)         VERSION="$2"; shift 2 ;;
     --bin-url)         BIN_URL="$2"; shift 2 ;;
     --http)            HTTP_ADDR="$2"; shift 2 ;;
     --grpc)            GRPC_ADDR="$2"; shift 2 ;;
@@ -49,7 +53,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ $EUID -eq 0 ]] || { echo "需 root 运行" >&2; exit 1; }
-[[ -n "$BIN_URL" ]] || { echo "缺少 --bin-url / STARPORT_PANEL_BIN_URL" >&2; exit 1; }
+if [[ -z "$BIN_URL" ]]; then
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    *) echo "面板目前只发 linux/amd64 二进制（本机 $(uname -m)）；请自行编译并用 --bin-url 指定" >&2; exit 1 ;;
+  esac
+  if [[ "$VERSION" == "latest" ]]; then
+    BIN_URL="https://github.com/$REPO/releases/latest/download/starport-panel-linux-$arch"
+  else
+    BIN_URL="https://github.com/$REPO/releases/download/$VERSION/starport-panel-linux-$arch"
+  fi
+fi
 if [[ -n "$TLS_CERT" || -n "$TLS_KEY" ]]; then
   [[ -n "$TLS_CERT" && -n "$TLS_KEY" ]] || { echo "--tls-cert 与 --tls-key 须同时给出" >&2; exit 1; }
   [[ -r "$TLS_CERT" && -r "$TLS_KEY" ]] || { echo "证书/私钥文件不可读" >&2; exit 1; }

@@ -60,12 +60,14 @@ starport-panel backup --out /mnt/backup/panel.db
 `scripts/install-starport-panel.sh` 下载二进制到 `/usr/local/bin/starport-panel`、写 `/etc/starport-panel/env`（bootstrap token 未给则随机生成）与 systemd 单元并 `enable --now`，最后签发第一枚 API 令牌打印出来：
 
 ```bash
-curl -fsSL <脚本直链> | STARPORT_PANEL_BIN_URL=<面板二进制直链> bash
-# 可选：STARPORT_BOOTSTRAP_TOKEN= STARPORT_HTTP_ADDR=:8080 STARPORT_GRPC_ADDR=:9192 STARPORT_GRPC_ENDPOINTS=panel.example.com:9192 STARPORT_TLS_CERT= STARPORT_TLS_KEY=
+curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/latest/download/install-starport-panel.sh | bash
+# 可选：STARPORT_VERSION=v0.1.0 STARPORT_BOOTSTRAP_TOKEN= STARPORT_HTTP_ADDR=:8080 STARPORT_GRPC_ADDR=:9192
+#       STARPORT_GRPC_ENDPOINTS=panel.example.com:9192 STARPORT_TLS_CERT= STARPORT_TLS_KEY=
+#       STARPORT_PANEL_BIN_URL=<自己编的二进制直链>
 systemctl status starport-panel; journalctl -u starport-panel -f
 ```
 
-改参数编辑 `/etc/starport-panel/env` 后 `systemctl restart starport-panel`。
+二进制默认从同一个 Release 取 `starport-panel-linux-amd64`（面板目前只发 amd64）。改参数编辑 `/etc/starport-panel/env` 后 `systemctl restart starport-panel`；重跑脚本只升级二进制，保留 env。
 
 ---
 
@@ -84,37 +86,37 @@ $env:GOOS="linux"; $env:GOARCH="amd64"; $env:CGO_ENABLED="0"
 go build -ldflags "-s -w -X main.version=v1.0.1" -o dist/starport-agent ./cmd/starport-agent
 ```
 
-### 一条命令发版（Gitee Release）
+### 一条命令发版（GitHub Release）
 
-`scripts/publish-agent-release.ps1` 把交叉编译、建 Release、传附件、校验直链一起做完：
+`scripts/publish-release.ps1` 把 UI 构建、面板 + agent 交叉编译、建 Release、传附件、校验直链一起做完：
 
 ```powershell
 cd scripts
-.\publish-agent-release.ps1 -Version v1.0.9              # 编译 + 建 Release + 传附件 + 校验
-.\publish-agent-release.ps1 -Version v1.0.9 -SkipBuild   # 二进制已编好，只补传附件
-.\publish-agent-release.ps1 -Version v1.0.9 -Replace     # 重发同版本，覆盖同名附件
-.\publish-agent-release.ps1 -Version v1.0.9 -Arch arm64
+.\publish-release.ps1 -Version v0.1.0                    # 全量：UI + panel(amd64) + agent(amd64/arm64) + 两个安装脚本 + SHA256SUMS
+.\publish-release.ps1 -Version v0.1.0 -SkipBuild -Replace # 已编好，只补传并覆盖同名附件
+.\publish-release.ps1 -Version v0.1.0 -SkipUI            # 跳过 pnpm，用现有 ui/dist
+.\publish-release.ps1 -Version v0.1.0 -Prerelease
 ```
 
-令牌从 `E:\Develop\.gitee-token` 读（Gitee「设置 → 安全设置 → 私人令牌」，勾 `projects`）。
-`install-starport-agent.sh` 会被转成 LF 再传，根治下面那个 `$'\r'` 报错。
-最后一步从**公开直链**下回来比 sha256——安装脚本用的就是那个 URL。
+令牌从 `E:\Develop\.github-token` 读（GitHub Settings → Developer settings → Personal access tokens；classic 勾 `repo`，或 fine-grained 给本仓库 Contents 读写）。
+安装脚本会被转成 LF 再传，根治下面那个 `$'\r'` 报错。最后一步从**公开直链**下回来比 sha256——安装脚本用的就是那个 URL。
+
+附件名固定：`starport-panel-linux-amd64`、`starport-agent-linux-{amd64,arm64}`、`install-starport-{panel,agent}.sh`、`SHA256SUMS`。安装脚本按 `uname -m` 选架构，`releases/latest/download/<名>` 永远指向最新版。
 
 ### 节点首次安装（需 root）
 
 `install-starport-agent.sh` 下载二进制到 `/usr/local/bin/starport-agent`、写 systemd 单元并 `enable --now`：
 
 ```bash
-curl -fsSL https://gitee.com/nihaoliuyi/starport-agent/releases/download/<tag>/install-starport-agent.sh | \
+curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/latest/download/install-starport-agent.sh | \
   STARPORT_SERVER_URL=http://panel.example.com:8080 \
-  STARPORT_BOOTSTRAP_TOKEN=<面板的 --bootstrap-token> \
-  STARPORT_AGENT_BIN_URL=https://gitee.com/nihaoliuyi/starport-agent/releases/download/<tag>/starport-agent \
+  STARPORT_BOOTSTRAP_TOKEN=<面板的引导令牌> \
   bash
 ```
 
 - `STARPORT_SERVER_URL`：面板 HTTP 地址。
-- `STARPORT_BOOTSTRAP_TOKEN`：须与面板 `--bootstrap-token` 一致。
-- `STARPORT_AGENT_BIN_URL`：starport-agent 二进制直链。
+- `STARPORT_BOOTSTRAP_TOKEN`：须与面板 `--bootstrap-token` 一致（面板安装脚本结束时打印）。
+- 可选 `STARPORT_VERSION=v0.1.0` 钉版本；`STARPORT_AGENT_BIN_URL` 用自己编的二进制。
 
 > 报 `: invalid option nameipefail` 或 `$'\r': command not found`，是脚本被存成了 CRLF。
 > 临时绕过：`curl -fsSL <脚本URL> | sed 's/\r$//' | STARPORT_...=... bash`。
@@ -201,7 +203,7 @@ cd scripts
 
 ### 分卷（--split）
 
-Gitee Release 单附件有大小上限。`--split` 把包切成 `<split-size>` 的分卷并生成 `.parts.json` 清单：
+托管平台对单附件有大小上限（GitHub Release 2 GB，Gitee 约 100 MB）。`--split` 把包切成 `<split-size>` 的分卷并生成 `.parts.json` 清单：
 
 ```
 dist/

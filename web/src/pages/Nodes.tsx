@@ -168,7 +168,7 @@ bash install-starport-agent.sh`}
         </Typography.Paragraph>
         <Form form={upForm} layout="vertical">
           <Form.Item name="binUrl" label="starport-agent 二进制地址（http/https，需与节点架构一致）" rules={[{ required: true, type: 'url', message: '请输入合法 URL' }]}>
-            <Input placeholder="https://example.com/starport-agent-linux-amd64" />
+            <Input placeholder="https://github.com/nihaoliuyiNN/starport-panel/releases/download/v0.1.0/starport-agent-linux-amd64" />
           </Form.Item>
           <Form.Item name="sha256" label="sha256（可选）" rules={[{ pattern: /^[0-9a-fA-F]{64}$/, message: '64 位十六进制' }]}>
             <Input placeholder="留空则不校验" style={{ fontFamily: 'monospace' }} />

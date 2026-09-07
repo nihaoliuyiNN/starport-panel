@@ -13,42 +13,33 @@ Web UI 内嵌在面板二进制里，只调公开 API；API 有 OpenAPI 描述�
 
 ## 部署
 
-需要一台跑面板的 Linux 机器，和若干台要纳管的 Linux 节点。节点能访问面板的 8080（注册）和 9192（gRPC）即可。
+需要一台跑面板的 Linux 机器（amd64），和若干台要纳管的 Linux 节点（amd64 / arm64）。节点能访问面板的 8080（注册）和 9192（gRPC）即可。
 
-**1. 编译**
-
-```bash
-make ui                      # 需要 node ≥ 20 + pnpm；不构建则面板只有 API 没有页面
-GOOS=linux GOARCH=amd64 go build -ldflags "-s -w -X main.version=v0.1.0" -o dist/starport-panel ./cmd/starport-panel
-make agent-linux             # dist/starport-agent-linux-{amd64,arm64}
-```
-
-把这两个二进制和 `scripts/install-starport-panel.sh`、`scripts/install-starport-agent.sh` 放到节点能 `curl` 到的地方（对象存储、内网 http server、Release 附件都行）。
-
-**2. 装面板**
+**1. 装面板**
 
 ```bash
-curl -fsSL <install-starport-panel.sh 直链> | STARPORT_PANEL_BIN_URL=<starport-panel 直链> bash
+curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/latest/download/install-starport-panel.sh | bash
 ```
 
-脚本会装到 `/usr/local/bin`，配置写 `/etc/starport-panel/env`，注册 systemd 服务，最后打印两样东西：agent 引导令牌和第一枚 API 令牌。浏览器打开 `http://<面板>:8080`，用 API 令牌登录。
+装到 `/usr/local/bin`，配置写 `/etc/starport-panel/env`，注册 systemd 服务，最后打印两样东西：agent 引导令牌和第一枚 API 令牌。浏览器打开 `http://<面板>:8080`，用 API 令牌登录。
 
 要 TLS 的话在 env 里加 `STARPORT_TLS_CERT` / `STARPORT_TLS_KEY`（得是节点信得过的证书），或者前面放反向代理，但 9192 是 agent 直连的，代理得能透传 gRPC。
 
-**3. 装节点**
+**2. 装节点**
 
 每台节点上：
 
 ```bash
-curl -fsSL <install-starport-agent.sh 直链> | \
+curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/latest/download/install-starport-agent.sh | \
   STARPORT_SERVER_URL=http://<面板>:8080 \
-  STARPORT_BOOTSTRAP_TOKEN=<上一步打印的引导令牌> \
-  STARPORT_AGENT_BIN_URL=<starport-agent 直链> bash
+  STARPORT_BOOTSTRAP_TOKEN=<上一步打印的引导令牌> bash
 ```
 
 几秒后面板「节点」页应该看到它在线。
 
-**4. 建集群**
+想钉版本加 `STARPORT_VERSION=v0.1.0`；想用自己编的二进制加 `STARPORT_PANEL_BIN_URL` / `STARPORT_AGENT_BIN_URL`。自己编：`make ui && make agent-linux`，面板用 `GOOS=linux go build ./cmd/starport-panel`。发版走 `scripts/publish-release.ps1`，它把编译、建 GitHub Release、传附件、校验直链一起做完。
+
+**3. 建集群**
 
 在 UI「集群」页新建：选在线模式（节点有外网）或离线包模式（先用 `scripts/build-k8s-bundle.sh` 打包传到 http 位置，填 `bundleUrl`），然后给集群加第一台 `first-master`，装机日志在任务抽屉里滚。控制面就绪后再加 `join-master` / `worker`。
 
