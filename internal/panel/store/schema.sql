@@ -86,3 +86,29 @@ CREATE TABLE IF NOT EXISTS task_logs (
     line    TEXT    NOT NULL,
     PRIMARY KEY (task_id, seq)
 );
+
+-- 写操作审计（不存请求体）
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at          TEXT    NOT NULL,
+    token_id    INTEGER NOT NULL DEFAULT 0,
+    token_name  TEXT    NOT NULL DEFAULT '',
+    method      TEXT    NOT NULL,
+    path        TEXT    NOT NULL,
+    status      INTEGER NOT NULL,
+    remote_ip   TEXT    NOT NULL DEFAULT '',
+    duration_ms INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_logs(at);
+
+-- Helm 仓库（按集群隔离：不同集群可用不同仓库源）
+CREATE TABLE IF NOT EXISTS helm_repos (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id INTEGER NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,
+    name       TEXT    NOT NULL,
+    url        TEXT    NOT NULL,
+    username   TEXT    NOT NULL DEFAULT '',
+    password   TEXT    NOT NULL DEFAULT '',
+    created_at TEXT    NOT NULL,
+    UNIQUE (cluster_id, name)
+);

@@ -89,6 +89,8 @@ type Facts struct {
 	// 平台以此展示节点负载，取代云厂商监控插件。
 	CPUUsedPercent float64 `json:"cpuUsedPercent"`
 	MemUsedPercent float64 `json:"memUsedPercent"`
+	// MachineID /etc/machine-id（Linux），面板注册去重用；无则空。
+	MachineID string `json:"machineId,omitempty"`
 }
 
 // RegisterRequest 引导注册请求体。
@@ -127,6 +129,7 @@ func (f Facts) toPB() *pb.Facts {
 		MemBytes:       f.MemBytes,
 		CpuUsedPercent: f.CPUUsedPercent,
 		MemUsedPercent: f.MemUsedPercent,
+		MachineId:      f.MachineID,
 	}
 }
 

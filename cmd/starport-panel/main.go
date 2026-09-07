@@ -6,10 +6,11 @@
 //	starport-panel serve --http :8080 --grpc :9192 --bootstrap-token <token>
 //	starport-panel token create --name ci      # 签发 API 令牌（明文只打印一次）
 //	starport-panel token list | revoke <id>
+//	starport-panel backup --out /backup/panel.db   # 数据库一致性快照
 //	starport-panel version
 //
 // 参数亦可用环境变量：STARPORT_HTTP_ADDR / STARPORT_GRPC_ADDR / STARPORT_BOOTSTRAP_TOKEN /
-// STARPORT_API_TOKEN（静态 API 令牌，可选）/ STARPORT_DATA_DIR /
+// STARPORT_API_TOKEN（静态 API 令牌，可选）/ STARPORT_DATA_DIR / STARPORT_TLS_CERT / STARPORT_TLS_KEY /
 // STARPORT_GRPC_ENDPOINTS（逗号分隔，下发给 agent 的 gRPC 入口；空则按注册请求的主机推导）。
 package main
 
@@ -44,6 +45,8 @@ func main() {
 		serve(os.Args[2:])
 	case "token":
 		tokenCmd(os.Args[2:])
+	case "backup":
+		backupCmd(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("starport-panel %s\n", version)
 	default:
@@ -63,10 +66,15 @@ func serve(args []string) {
 	fs.StringVar(&cfg.APIToken, "api-token", env("STARPORT_API_TOKEN", ""), "静态 API 令牌（可选，与 `token create` 签发的令牌并行有效）")
 	fs.BoolVar(&cfg.InsecureNoAuth, "insecure-no-auth", false, "关闭 API 鉴权（仅本机开发）")
 	fs.StringVar(&endpoints, "grpc-endpoints", env("STARPORT_GRPC_ENDPOINTS", ""), "下发给 agent 的 gRPC 入口（逗号分隔 host:port）；空则按注册请求的主机推导")
+	fs.StringVar(&cfg.TLSCert, "tls-cert", env("STARPORT_TLS_CERT", ""), "TLS 证书（PEM，全链）；与 --tls-key 同时给出则 HTTP 与 gRPC 都启用 TLS")
+	fs.StringVar(&cfg.TLSKey, "tls-key", env("STARPORT_TLS_KEY", ""), "TLS 私钥（PEM）")
 	_ = fs.Parse(args)
 
 	if cfg.BootstrapToken == "" {
 		log.Fatal("缺少 --bootstrap-token（或 STARPORT_BOOTSTRAP_TOKEN）")
+	}
+	if (cfg.TLSCert == "") != (cfg.TLSKey == "") {
+		log.Fatal("--tls-cert 与 --tls-key 须同时给出")
 	}
 	for _, e := range strings.Split(endpoints, ",") {
 		if e = strings.TrimSpace(e); e != "" {
@@ -157,6 +165,27 @@ func tokenCmd(args []string) {
 	}
 }
 
+// backupCmd 生成数据库一致性快照：starport-panel backup --out /backup/panel-20260907.db
+// 恢复：停面板，把快照文件拷回 <data-dir>/panel.db（删掉旧的 -wal / -shm），再启动。
+func backupCmd(args []string) {
+	fs := flag.NewFlagSet("backup", flag.ExitOnError)
+	dataDir := fs.String("data-dir", env("STARPORT_DATA_DIR", defaultDataDir()), "状态目录（与 serve 一致）")
+	out := fs.String("out", "", "输出文件（默认 <data-dir>/backups/panel-<时间>.db）")
+	_ = fs.Parse(args)
+	if *out == "" {
+		*out = filepath.Join(*dataDir, "backups", "panel-"+time.Now().Format("20060102-150405")+".db")
+	}
+	st, err := store.Open(filepath.Join(*dataDir, "panel.db"))
+	if err != nil {
+		log.Fatalf("打开数据库失败: %v", err)
+	}
+	defer st.Close()
+	if err := st.Backup(context.Background(), *out); err != nil {
+		log.Fatalf("备份失败: %v", err)
+	}
+	fmt.Printf("已备份到 %s\n", *out)
+}
+
 func fmtTime(t time.Time) string {
 	if t.IsZero() {
 		return "-"
@@ -165,7 +194,7 @@ func fmtTime(t time.Time) string {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "用法: starport-panel <serve|token|version> [flags]")
+	fmt.Fprintln(os.Stderr, "用法: starport-panel <serve|token|backup|version> [flags]")
 }
 
 // defaultDataDir Linux 服务器用 /var/lib；其它平台（开发机）用当前目录下的 data/。

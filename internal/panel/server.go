@@ -5,6 +5,7 @@ package panel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -12,9 +13,11 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	"starport-panel/internal/panel/agenthub"
 	"starport-panel/internal/panel/cluster"
+	"starport-panel/internal/panel/helm"
 	"starport-panel/internal/panel/kube"
 	"starport-panel/internal/panel/store"
 	"starport-panel/internal/panel/task"
@@ -33,7 +36,14 @@ type Config struct {
 	APIToken string
 	// InsecureNoAuth 关闭 API 鉴权（仅本机开发）。
 	InsecureNoAuth bool
+	// TLSCert / TLSKey 同时用于 HTTP 与 gRPC；都非空即启用 TLS，注册应答会告知 agent 走 TLS。
+	// agent 用系统信任库校验证书，因此须是公网可信证书（如 Let's Encrypt），自签名证书需要另行分发到节点。
+	TLSCert string
+	TLSKey  string
 }
+
+// TLS 是否启用 TLS。
+func (c Config) TLS() bool { return c.TLSCert != "" && c.TLSKey != "" }
 
 // Server 面板进程。
 type Server struct {
@@ -43,6 +53,7 @@ type Server struct {
 	tasks    *task.Runner
 	clusters *cluster.Service
 	kube     *kube.Client
+	helm     *helm.Client
 	http     *http.Server
 	grpc     *grpc.Server
 }
@@ -68,6 +79,7 @@ func New(cfg Config) (*Server, error) {
 		BootstrapToken: cfg.BootstrapToken,
 		GrpcEndpoints:  cfg.GrpcEndpoints,
 		GrpcPort:       grpcPort,
+		GrpcTLS:        cfg.TLS(),
 	})
 	tasks := task.New(st)
 	s := &Server{
@@ -77,6 +89,7 @@ func New(cfg Config) (*Server, error) {
 		tasks:    tasks,
 		clusters: cluster.New(st, hub, tasks),
 		kube:     kube.New(),
+		helm:     helm.New(),
 	}
 	s.clusters.OnDeleted(s.kube.Forget)
 
@@ -86,8 +99,17 @@ func New(cfg Config) (*Server, error) {
 	} else if n, _ := st.CountActiveTokens(context.Background()); n == 0 && cfg.APIToken == "" {
 		log.Printf("[panel] 尚无 API 令牌：除 agent 注册外所有 API 将拒绝访问；请执行 `starport-panel token create --name <名称>`")
 	}
-	s.http = &http.Server{Addr: cfg.HTTPAddr, Handler: s.auth(s.routes()), ReadHeaderTimeout: 10 * time.Second}
-	s.grpc = grpc.NewServer(agenthub.ServerOptions()...)
+	s.http = &http.Server{Addr: cfg.HTTPAddr, Handler: s.auth(s.audit(s.routes())), ReadHeaderTimeout: 10 * time.Second}
+	grpcOpts := agenthub.ServerOptions()
+	if cfg.TLS() {
+		creds, err := credentials.NewServerTLSFromFile(cfg.TLSCert, cfg.TLSKey)
+		if err != nil {
+			_ = st.Close()
+			return nil, fmt.Errorf("加载 TLS 证书: %w", err)
+		}
+		grpcOpts = append(grpcOpts, grpc.Creds(creds))
+	}
+	s.grpc = grpc.NewServer(grpcOpts...)
 	pb.RegisterNodeAgentServiceServer(s.grpc, hub)
 	return s, nil
 }
@@ -105,8 +127,15 @@ func (s *Server) Run(ctx context.Context) error {
 		errCh <- s.grpc.Serve(lis)
 	}()
 	go func() {
-		log.Printf("[panel] HTTP 监听 %s，数据目录 %s", s.cfg.HTTPAddr, s.cfg.DataDir)
-		if err := s.http.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if s.cfg.TLS() {
+			log.Printf("[panel] HTTPS 监听 %s，数据目录 %s", s.cfg.HTTPAddr, s.cfg.DataDir)
+			err = s.http.ListenAndServeTLS(s.cfg.TLSCert, s.cfg.TLSKey)
+		} else {
+			log.Printf("[panel] HTTP 监听 %s，数据目录 %s", s.cfg.HTTPAddr, s.cfg.DataDir)
+			err = s.http.ListenAndServe()
+		}
+		if !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()

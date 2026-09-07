@@ -1358,8 +1358,10 @@ type Facts struct {
 	MemBytes       uint64                 `protobuf:"varint,7,opt,name=mem_bytes,json=memBytes,proto3" json:"mem_bytes,omitempty"`
 	CpuUsedPercent float64                `protobuf:"fixed64,8,opt,name=cpu_used_percent,json=cpuUsedPercent,proto3" json:"cpu_used_percent,omitempty"`
 	MemUsedPercent float64                `protobuf:"fixed64,9,opt,name=mem_used_percent,json=memUsedPercent,proto3" json:"mem_used_percent,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// 机器唯一标识（Linux /etc/machine-id；无则空）。面板注册时优先按它去重，避免换 IP / 改主机名产生重复节点。
+	MachineId     string `protobuf:"bytes,10,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Facts) Reset() {
@@ -1455,7 +1457,14 @@ func (x *Facts) GetMemUsedPercent() float64 {
 	return 0
 }
 
-// 面板下发的结构化装机指令。agent 按 role 编排本机装机阶段。
+func (x *Facts) GetMachineId() string {
+	if x != nil {
+		return x.MachineId
+	}
+	return ""
+}
+
+// 控制面下发的结构化装机指令。agent 按 role 编排本机装机阶段。
 type InstallSpec struct {
 	state                protoimpl.MessageState `protogen:"open.v1"`
 	Role                 NodeRole               `protobuf:"varint,1,opt,name=role,proto3,enum=agent.v1.NodeRole" json:"role,omitempty"`
@@ -1997,7 +2006,7 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\x05Error\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x1c\n" +
-	"\tretryable\x18\x03 \x01(\bR\tretryable\"\x8e\x02\n" +
+	"\tretryable\x18\x03 \x01(\bR\tretryable\"\xad\x02\n" +
 	"\x05Facts\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x1f\n" +
 	"\vinternal_ip\x18\x02 \x01(\tR\n" +
@@ -2008,7 +2017,10 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\tcpu_cores\x18\x06 \x01(\x05R\bcpuCores\x12\x1b\n" +
 	"\tmem_bytes\x18\a \x01(\x04R\bmemBytes\x12(\n" +
 	"\x10cpu_used_percent\x18\b \x01(\x01R\x0ecpuUsedPercent\x12(\n" +
-	"\x10mem_used_percent\x18\t \x01(\x01R\x0ememUsedPercent\"\xfd\x03\n" +
+	"\x10mem_used_percent\x18\t \x01(\x01R\x0ememUsedPercent\x12\x1d\n" +
+	"\n" +
+	"machine_id\x18\n" +
+	" \x01(\tR\tmachineId\"\xfd\x03\n" +
 	"\vInstallSpec\x12&\n" +
 	"\x04role\x18\x01 \x01(\x0e2\x12.agent.v1.NodeRoleR\x04role\x12\x1f\n" +
 	"\vk8s_version\x18\x02 \x01(\tR\n" +

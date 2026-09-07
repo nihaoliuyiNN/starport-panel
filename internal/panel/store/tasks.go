@@ -13,6 +13,7 @@ const (
 	TaskExec    = "exec"
 	TaskRemove  = "remove"  // 节点移出集群（drain + kubeadm reset）
 	TaskDestroy = "destroy" // 删集群时逐节点 reset
+	TaskUpgrade = "upgrade" // 升级节点上的 starport-agent
 
 	TaskRunning   = "running"
 	TaskSucceeded = "succeeded"

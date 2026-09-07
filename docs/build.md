@@ -34,13 +34,38 @@ UI 开发：`make ui-dev` 起 Vite 开发服务器（:5173），`/api` 代理到
 | `--api-token` | `STARPORT_API_TOKEN` | 空 | 静态 API 令牌（可选），与 `token create` 签发的令牌并行有效 |
 | `--insecure-no-auth` | — | 关 | 关闭 API 鉴权，仅本机开发 |
 | `--grpc-endpoints` | `STARPORT_GRPC_ENDPOINTS` | 按注册请求的主机推导 | 下发给 agent 的 gRPC 入口（面板在 LB/NAT 后时显式指定） |
+| `--tls-cert` / `--tls-key` | `STARPORT_TLS_CERT` / `STARPORT_TLS_KEY` | 空 | 同时给出即 HTTP 与 gRPC 都启用 TLS；注册应答会告知 agent 走 TLS |
 
-两个端口都要对节点可达：8080 用于注册，9192 用于长连。面板还需能访问集群 apiserver（`controlPlaneEndpoint`）以提供 `k8s/*` 视图、日志与容器 exec。
+两个端口都要对节点可达：8080 用于注册，9192 用于长连。面板还需能访问集群 apiserver（`controlPlaneEndpoint`）以提供 `k8s/*` 视图、日志与容器 exec，并能访问 Helm 仓库（拉 index / chart）。
 
 API 令牌：`token create --name <名称>` / `token list` / `token revoke <id>`，都直接操作 `--data-dir` 下的数据库。库里只存 sha256，丢了明文只能重签。
-面板对公网暴露时请置于 TLS 反向代理之后（令牌明文经 Header 传输）。
 
-状态全部在 `panel.db` 一个文件里（节点凭据、集群 kubeconfig / join 凭据、任务日志、API 令牌哈希），备份即拷贝该文件（WAL 模式下连同 `-wal` 一起）。API 见 [api.md](api.md)。
+**TLS**：两种做法任选。(a) 面板直接持证：`--tls-cert fullchain.pem --tls-key privkey.pem`，agent 用系统信任库校验，所以须是公网可信证书（Let's Encrypt 等），自签名证书需另行分发到节点；此时 `STARPORT_SERVER_URL` 用 `https://`。
+(b) 面板明文，前面放 TLS 反向代理：HTTP 走代理即可，但 gRPC 9192 是 agent 直连面板的，要么代理也做 gRPC（HTTP/2）透传，要么内网明文。对公网暴露时至少要做其一（令牌明文经 Header 传输）。
+
+**审计**：所有写操作（POST / PUT / PATCH / DELETE）落 `audit_logs` 表，Web UI「审计」页或 `GET /api/v1/audit` 查看。审计表只增不删，长期运行可自行定期清理（`store.PruneAudit`，暂无 CLI）。
+
+**备份 / 恢复**：状态全部在 `panel.db` 一个文件里（节点凭据、集群 kubeconfig / join 凭据、任务日志、API 令牌哈希、审计、Helm 仓库）。
+
+```bash
+starport-panel backup                              # → <data-dir>/backups/panel-<时间>.db（面板运行中亦可，VACUUM INTO 一致性快照）
+starport-panel backup --out /mnt/backup/panel.db
+# 恢复：停面板，把快照拷回 <data-dir>/panel.db，删掉旧的 panel.db-wal / -shm，再启动
+```
+
+不要在面板运行时直接拷 `panel.db`（WAL 模式下可能拷到半截）。API 见 [api.md](api.md)。
+
+### 面板一键安装（Linux，需 root）
+
+`scripts/install-starport-panel.sh` 下载二进制到 `/usr/local/bin/starport-panel`、写 `/etc/starport-panel/env`（bootstrap token 未给则随机生成）与 systemd 单元并 `enable --now`，最后签发第一枚 API 令牌打印出来：
+
+```bash
+curl -fsSL <脚本直链> | STARPORT_PANEL_BIN_URL=<面板二进制直链> bash
+# 可选：STARPORT_BOOTSTRAP_TOKEN= STARPORT_HTTP_ADDR=:8080 STARPORT_GRPC_ADDR=:9192 STARPORT_GRPC_ENDPOINTS=panel.example.com:9192 STARPORT_TLS_CERT= STARPORT_TLS_KEY=
+systemctl status starport-panel; journalctl -u starport-panel -f
+```
+
+改参数编辑 `/etc/starport-panel/env` 后 `systemctl restart starport-panel`。
 
 ---
 

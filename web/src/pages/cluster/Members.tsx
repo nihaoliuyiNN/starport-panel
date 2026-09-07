@@ -57,6 +57,17 @@ export default function Members({ cluster, onTask }: Props) {
     }
   };
 
+  // 失败成员重试：以原角色重新下发装机（后端允许同集群 failed 成员再次加入；首 master 失败时集群为 failed 也可重试）
+  const retry = async (m: Member) => {
+    try {
+      const res = await clustersApi.addNode(cluster.id, m.nodeId, m.role);
+      await qc.invalidateQueries({ queryKey: ['cluster', cluster.id] });
+      onTask(res.taskId);
+    } catch (e) {
+      message.error(errMsg(e));
+    }
+  };
+
   return (
     <>
       {!hasControlPlane && (
@@ -80,10 +91,21 @@ export default function Members({ cluster, onTask }: Props) {
           { title: '说明', render: (_, m) => (m.error ? <Typography.Text type="danger">{m.error}</Typography.Text> : '-') },
           { title: '更新时间', width: 170, render: (_, m) => fmtTime(m.updatedAt) },
           {
-            title: '操作', width: 200,
+            title: '操作', width: 260,
             render: (_, m) => (
               <Space>
                 {m.taskId > 0 && <Button size="small" onClick={() => onTask(m.taskId)}>任务日志</Button>}
+                {m.status === 'failed' && (
+                  <Popconfirm
+                    title="重试装机？"
+                    description={`以「${m.role}」角色重新执行安装（脚本幂等，可直接重跑；若上次残留半成品建议先移除）。`}
+                    okText="重试"
+                    onConfirm={() => retry(m)}
+                    disabled={!nodeMap.get(m.nodeId)?.online}
+                  >
+                    <Button size="small" type="primary" ghost disabled={!nodeMap.get(m.nodeId)?.online}>重试</Button>
+                  </Popconfirm>
+                )}
                 <Popconfirm
                   title="移除节点？"
                   description="将在其它控制面上 drain 并删除该节点，再对其执行 kubeadm reset。"

@@ -8,7 +8,7 @@
 - **结构化装机**：面板下发的是结构化 `InstallSpec`，不是一坨脚本；预检 / 阶段 / 失败码都是数据，可重试、可断点。
 - **契约先行**：面板 ↔ agent 走 gRPC 双向流，`.proto` 是唯一事实来源。
 
-> 当前状态：**Phase 3b —— 单二进制可部署面板（内嵌 Web UI + 完整 API）**。Helm 应用市场见下方路线图。
+> 当前状态：**Phase 4 —— 功能闭环，待真机验证**。装机 / 接管集群、工作负载与任意资源、Helm 应用市场、实时用量、审计、TLS、备份、agent 自升级、OpenAPI 全部就位；尚未在真实多节点环境跑过端到端装机，见下方路线图。
 
 ## 组成
 
@@ -16,14 +16,15 @@
 |---|---|
 | `cmd/starport-panel` | 控制面进程：HTTP API（:8080）+ agent gRPC 入口（:9192） |
 | `cmd/starport-agent` | 节点侧代理：注册、心跳、执行脚本、内置装机引擎、终端会话 |
-| `internal/panel` | 面板装配层（HTTP 路由、鉴权、gRPC 服务端） |
+| `internal/panel` | 面板装配层（HTTP 路由、鉴权、审计、TLS、gRPC 服务端、内嵌 `openapi.yaml`） |
 | `internal/panel/ui` | 内嵌 Web UI 构建产物（`go:embed`），SPA 回退 |
 | `web/` | Web UI 源码：React + Vite + Ant Design + xterm.js，`make ui` 构建进面板二进制 |
-| `internal/panel/agenthub` | agent 连接中枢：连接表、请求关联、会话路由、注册端点 |
-| `internal/panel/store` | SQLite 持久化：节点、集群、成员、任务与日志 |
-| `internal/panel/cluster` | 集群编排：首 master init → 接管 kubeconfig / join 凭据 → master/worker 加入 → 节点移除 / 删集群 |
+| `internal/panel/agenthub` | agent 连接中枢：连接表、请求关联、会话路由、注册端点、主动断连 |
+| `internal/panel/store` | SQLite 持久化：节点、集群、成员、任务与日志、令牌、审计、Helm 仓库；`VACUUM INTO` 备份 |
+| `internal/panel/cluster` | 集群编排：首 master init → 接管 kubeconfig / join 凭据 → master/worker 加入 → 节点移除 / 删集群；接管已有集群 |
 | `internal/panel/task` | 异步任务执行器：日志落库、取消、终态回调 |
-| `internal/panel/kube` | client-go 直连 apiserver：节点 / 命名空间 / Pod / Deployment / Service / Ingress / 事件视图，扩缩、重启、暴露，日志流，容器 exec，server-side apply，任意 GVR 通用读写 |
+| `internal/panel/kube` | client-go 直连 apiserver：节点（cordon）/ 命名空间 / Pod / Deployment / Service / Ingress / 事件视图，扩缩、重启、暴露，日志流，容器 exec，server-side apply，任意 GVR 通用读写，metrics-server 用量 |
+| `internal/panel/helm` | Helm Go SDK：仓库索引缓存、Chart 搜索 / 详情 / 版本，release 安装 / 升级 / 卸载 / 回滚 / 历史 |
 | `internal/agent` | agent 运行时：呼出长连、串行执行队列、幂等、PTY 会话 |
 | `internal/installer` | Kubernetes 装机引擎（自洽，只依赖标准库与系统命令） |
 | `internal/pb/agentv1` | 由 `proto/` 生成的 Go 代码（入库） |
@@ -67,12 +68,21 @@ curl -s -H "$H" 'http://127.0.0.1:8080/api/v1/clusters/1/k8s/resources/core/v1/c
 #   ws://127.0.0.1:8080/api/v1/nodes/1/terminal?token=spt_...        节点终端（xterm.js 直连）
 #   ws://127.0.0.1:8080/api/v1/clusters/1/k8s/namespaces/default/pods/nginx-xxx/exec?token=spt_...   容器终端
 
-# 6. 收尾：移除节点 / 删集群
+# 6. Helm 应用：加仓库 → 搜 chart → 安装
+curl -s -H "$H" -X POST http://127.0.0.1:8080/api/v1/clusters/1/helm/repos -d '{"name":"bitnami","url":"https://charts.bitnami.com/bitnami"}'
+curl -s -H "$H" 'http://127.0.0.1:8080/api/v1/clusters/1/helm/charts?q=redis'
+curl -s -H "$H" -X POST http://127.0.0.1:8080/api/v1/clusters/1/helm/releases -d '{"namespace":"cache","name":"redis","repo":"bitnami","chart":"redis","createNamespace":true,"values":"architecture: standalone\n"}'
+
+# 7. 接管一个不是面板装的集群（只要 kubeconfig；之后 k8s / helm 接口全部可用，但不能加 / 移节点）
+curl -s -H "$H" -X POST http://127.0.0.1:8080/api/v1/clusters/import -d "{\"name\":\"legacy\",\"kubeconfig\":$(jq -Rs . < ~/.kube/config)}"
+
+# 8. 收尾：移除节点 / 删集群
 curl -s -H "$H" -X DELETE http://127.0.0.1:8080/api/v1/clusters/1/nodes/2      # drain + delete node + kubeadm reset → taskId
 curl -s -H "$H" -X DELETE 'http://127.0.0.1:8080/api/v1/clusters/1?force=true'  # 全部在线节点 reset 后删记录
 ```
 
-生产节点安装：`scripts/install-starport-agent.sh`（systemd 常驻，见 `docs/build.md`）。完整 API 见 [docs/api.md](docs/api.md)。
+生产部署：面板 `scripts/install-starport-panel.sh`、节点 `scripts/install-starport-agent.sh`（都是 systemd 常驻，见 [docs/build.md](docs/build.md)）。
+完整 API 见 [docs/api.md](docs/api.md)；机器可读版 `GET /api/v1/openapi.yaml`。
 
 ## 架构
 
@@ -101,7 +111,8 @@ agent 只做出站连接；面板沿同一条流反向下发 `exec` / `install` 
 - [x] Phase 2：节点移除 / 删集群、节点 Web 终端、工作负载视图（命名空间 / Pod / Deployment）、扩缩 / 重启 / 删 Pod、Pod 日志流、容器 exec、server-side apply
 - [x] Phase 3a：API Token 鉴权（库内令牌 + 静态令牌，CLI 管理）、Service / Ingress / Events 视图、Deployment 暴露、通用资源接口（任意 GVR + CRD，YAML 查看）
 - [x] Phase 3b：Web UI（React + Ant Design，随二进制内嵌）：节点 / 终端、建集群向导、成员管理、工作负载（Pod 日志 / exec / 扩缩 / 暴露）、网络、事件、YAML apply、任意资源浏览、任务日志、令牌管理
-- [ ] Phase 4：Helm 应用市场、`panel/v1` 公开 API 定稿（OpenAPI）、多面板对接、指标（metrics-server 图表）
+- [x] Phase 4：Helm 应用市场（仓库 / 搜索 / 安装 / 升级 / 回滚）、接管已有集群、实时用量（metrics-server）、节点 cordon、资源 YAML 在线编辑 apply、审计日志、面板 TLS、数据库备份、面板安装脚本、agent 自升级、machine-id 去重、OpenAPI 文档（随二进制提供并由测试校验与路由一致）
+- [ ] Phase 5：真机端到端验证（多 master HA 装机、节点移除、离线包）；按验证结果修正装机引擎；OCI Helm 仓库；用量历史图表
 
 ## 开发
 

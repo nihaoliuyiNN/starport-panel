@@ -57,6 +57,55 @@ func TestNodes(t *testing.T) {
 	}
 }
 
+func TestRegisterDedupByMachineID(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	// 老 agent（无 machine-id）注册，之后升级到带 machine-id 的版本：按 hostname+ip 认出并补上 machine_id
+	a := agent.Facts{Hostname: "n1", InternalIP: "10.0.0.1"}
+	id, _, _ := s.RegisterNode(a, "v1")
+	a.MachineID = "mid-aaaa"
+	id2, _, _ := s.RegisterNode(a, "v2")
+	if id2 != id {
+		t.Fatalf("upgrade path: want %d got %d", id, id2)
+	}
+	n, _ := s.GetNode(ctx, id)
+	if n.Facts.MachineID != "mid-aaaa" {
+		t.Fatalf("machine_id not backfilled: %+v", n.Facts)
+	}
+
+	// 换 IP + 改主机名，machine-id 不变：仍是同一节点，且回写新 hostname/ip
+	b := agent.Facts{Hostname: "renamed", InternalIP: "10.0.0.9", MachineID: "mid-aaaa"}
+	id3, _, _ := s.RegisterNode(b, "v2")
+	if id3 != id {
+		t.Fatalf("same machine-id must reuse node: %d vs %d", id3, id)
+	}
+	n, _ = s.GetNode(ctx, id)
+	if n.Facts.Hostname != "renamed" || n.Facts.InternalIP != "10.0.0.9" {
+		t.Fatalf("facts not refreshed: %+v", n.Facts)
+	}
+
+	// 另一台机器碰巧同 hostname+ip（克隆镜像换机）但 machine-id 不同：新节点
+	c := agent.Facts{Hostname: "renamed", InternalIP: "10.0.0.9", MachineID: "mid-bbbb"}
+	id4, _, _ := s.RegisterNode(c, "v2")
+	if id4 == id {
+		t.Fatal("different machine-id must not collide")
+	}
+
+	// 删除：不存在 → ErrNotFound；删后令牌失效
+	_, tok, _ := s.RegisterNode(agent.Facts{Hostname: "x", InternalIP: "1.1.1.1", MachineID: "mid-x"}, "v")
+	nodes, _ := s.ListNodes(ctx)
+	if err := s.DeleteNode(ctx, nodes[len(nodes)-1].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.Authenticate(tok); ok {
+		t.Fatal("token of deleted node must fail")
+	}
+	if err := s.DeleteNode(ctx, 9999); err != ErrNotFound {
+		t.Fatalf("want ErrNotFound got %v", err)
+	}
+}
+
 func TestClustersAndTasks(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()

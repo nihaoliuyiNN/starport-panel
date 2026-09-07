@@ -1,21 +1,22 @@
 import { useMemo, useState } from 'react';
-import { App, Alert, Button, Drawer, Popconfirm, Select, Space, Table, Tag, Typography } from 'antd';
-import { CopyOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
+import { App, Alert, Button, Popconfirm, Select, Space, Table, Tag } from 'antd';
+import { DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
 import { errMsg, k8sApi, type ResourceItem, type ResourceKind } from '../../api';
 import NamespaceSelect from './NamespaceSelect';
-import { copyText, fromNow } from '../../util';
+import YamlDrawer, { type YamlTarget } from '../../components/YamlDrawer';
+import { fromNow } from '../../util';
 
 const kindKey = (k: ResourceKind) => `${k.group}|${k.version}|${k.resource}`;
 
-/** 任意资源类型（含 CRD）的通用浏览：列表 + YAML 查看 + 删除。 */
+/** 任意资源类型（含 CRD）的通用浏览：列表 + YAML 查看 / 编辑 apply + 删除。 */
 export default function Resources({ cid }: { cid: number }) {
   const { message } = App.useApp();
   const api = k8sApi(cid);
   const kinds = useQuery({ queryKey: ['k8s', cid, 'resource-kinds'], queryFn: api.resourceKinds, staleTime: 60_000 });
   const [sel, setSel] = useState<string>('|v1|configmaps');
   const [ns, setNs] = useState('');
-  const [viewing, setViewing] = useState<{ item: ResourceItem; yaml: string } | null>(null);
+  const [viewing, setViewing] = useState<YamlTarget | null>(null);
 
   const kind = useMemo(() => (kinds.data ?? []).find((k) => kindKey(k) === sel), [kinds.data, sel]);
   const [g, v, r] = sel.split('|');
@@ -25,14 +26,7 @@ export default function Resources({ cid }: { cid: number }) {
     enabled: !!kind,
   });
 
-  const view = async (item: ResourceItem) => {
-    try {
-      const yaml = await api.getResource(g, v, r, item.name, item.namespace);
-      setViewing({ item, yaml });
-    } catch (e) {
-      message.error(errMsg(e));
-    }
-  };
+  const view = (item: ResourceItem) => setViewing({ group: g, version: v, resource: r, kind: kind?.kind, namespace: item.namespace, name: item.name });
   const del = async (item: ResourceItem) => {
     try {
       await api.deleteResource(g, v, r, item.name, item.namespace);
@@ -88,16 +82,7 @@ export default function Resources({ cid }: { cid: number }) {
         ]}
       />
 
-      <Drawer
-        open={!!viewing}
-        onClose={() => setViewing(null)}
-        width={820}
-        title={viewing ? `${kind?.kind ?? ''} ${viewing.item.namespace ? `${viewing.item.namespace}/` : ''}${viewing.item.name}` : ''}
-        extra={<Button icon={<CopyOutlined />} size="small" onClick={async () => { if (viewing && (await copyText(viewing.yaml))) message.success('已复制'); }}>复制</Button>}
-      >
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>只读视图；修改请到「YAML」页 apply。</Typography.Text>
-        <pre style={{ background: '#fafafa', padding: 12, borderRadius: 4, fontSize: 12, lineHeight: 1.5, overflow: 'auto', marginTop: 8 }}>{viewing?.yaml}</pre>
-      </Drawer>
+      <YamlDrawer cid={cid} target={viewing} onClose={() => setViewing(null)} onApplied={() => list.refetch()} />
     </>
   );
 }

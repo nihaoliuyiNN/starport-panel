@@ -1,13 +1,14 @@
 import { useState } from 'react';
 import { App, Alert, Button, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
-import { CodeOutlined, DeleteOutlined, FileTextOutlined, ReloadOutlined } from '@ant-design/icons';
+import { CodeOutlined, DeleteOutlined, FileSearchOutlined, FileTextOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { errMsg, k8sApi, wsUrl, type Deployment, type Pod } from '../../api';
+import { ApiError, errMsg, k8sApi, wsUrl, type Deployment, type Pod } from '../../api';
 import { PodPhaseTag } from '../../components/tags';
 import PodLogs from '../../components/PodLogs';
 import Terminal from '../../components/Terminal';
+import YamlDrawer, { type YamlTarget } from '../../components/YamlDrawer';
 import NamespaceSelect from './NamespaceSelect';
-import { fromNow } from '../../util';
+import { fmtBytes, fromNow } from '../../util';
 
 export default function Workloads({ cid }: { cid: number }) {
   const [ns, setNs] = useState('default');
@@ -26,9 +27,17 @@ function Pods({ cid, ns }: { cid: number; ns: string }) {
   const { message } = App.useApp();
   const api = k8sApi(cid);
   const q = useQuery({ queryKey: ['k8s', cid, 'pods', ns], queryFn: () => api.pods(ns), refetchInterval: 5000 });
+  const usage = useQuery({
+    queryKey: ['k8s', cid, 'pod-metrics', ns],
+    queryFn: () => api.podMetrics(ns),
+    refetchInterval: 15000,
+    retry: (n, e) => !(e instanceof ApiError && e.code === 'NO_METRICS_SERVER') && n < 2,
+  });
+  const usageOf = (p: Pod) => usage.data?.find((u) => u.namespace === p.namespace && u.name === p.name);
   const [logPod, setLogPod] = useState<Pod | null>(null);
   const [execPod, setExecPod] = useState<Pod | null>(null);
   const [execContainer, setExecContainer] = useState('');
+  const [yamlTarget, setYamlTarget] = useState<YamlTarget | null>(null);
 
   const del = async (p: Pod) => {
     try {
@@ -59,11 +68,18 @@ function Pods({ cid, ns }: { cid: number; ns: string }) {
           { title: '重启', dataIndex: 'restarts', width: 60 },
           { title: '节点', dataIndex: 'node', width: 140 },
           { title: 'Pod IP', dataIndex: 'podIp', width: 130 },
+          ...(usage.data
+            ? [
+                { title: 'CPU', width: 80, render: (_: unknown, p: Pod) => { const u = usageOf(p); return u ? `${u.cpuMilli}m` : '-'; } },
+                { title: '内存', width: 90, render: (_: unknown, p: Pod) => { const u = usageOf(p); return u ? fmtBytes(u.memBytes) : '-'; } },
+              ]
+            : []),
           { title: '存活', width: 100, render: (_, p) => fromNow(p.createdAt) },
           {
-            title: '操作', width: 170,
+            title: '操作', width: 200,
             render: (_, p) => (
               <Space size={4}>
+                <Tooltip title="YAML"><Button size="small" icon={<FileSearchOutlined />} onClick={() => setYamlTarget({ group: '', version: 'v1', resource: 'pods', kind: 'Pod', namespace: p.namespace, name: p.name })} /></Tooltip>
                 <Tooltip title="日志"><Button size="small" icon={<FileTextOutlined />} onClick={() => setLogPod(p)} /></Tooltip>
                 <Tooltip title="终端"><Button size="small" icon={<CodeOutlined />} onClick={() => { setExecPod(p); setExecContainer(p.containers[0]?.name ?? ''); }} disabled={p.phase !== 'Running'} /></Tooltip>
                 <Popconfirm title="删除 Pod？" description="由控制器管理的 Pod 会被重建" onConfirm={() => del(p)} okButtonProps={{ danger: true }}>
@@ -85,6 +101,8 @@ function Pods({ cid, ns }: { cid: number; ns: string }) {
       >
         {execPod && execContainer && <Terminal url={wsUrl(api.execPath(execPod.namespace, execPod.name), { container: execContainer })} height={520} />}
       </Modal>
+
+      <YamlDrawer cid={cid} target={yamlTarget} onClose={() => setYamlTarget(null)} onApplied={() => q.refetch()} />
     </>
   );
 }
@@ -99,6 +117,7 @@ function Deployments({ cid, ns }: { cid: number; ns: string }) {
   const [scaleForm] = Form.useForm<{ replicas: number }>();
   const [exposeForm] = Form.useForm<{ name?: string; type: string; port: number; targetPort?: number; nodePort?: number; protocol: string }>();
   const exposeType = Form.useWatch('type', exposeForm);
+  const [yamlTarget, setYamlTarget] = useState<YamlTarget | null>(null);
 
   const restart = async (d: Deployment) => {
     try {
@@ -152,9 +171,10 @@ function Deployments({ cid, ns }: { cid: number; ns: string }) {
           { title: '镜像', render: (_, d) => d.images.map((i) => <div key={i} style={{ fontSize: 12, fontFamily: 'monospace' }}>{i}</div>) },
           { title: '存活', width: 100, render: (_, d) => fromNow(d.createdAt) },
           {
-            title: '操作', width: 230,
+            title: '操作', width: 290,
             render: (_, d) => (
               <Space size={4}>
+                <Button size="small" onClick={() => setYamlTarget({ group: 'apps', version: 'v1', resource: 'deployments', kind: 'Deployment', namespace: d.namespace, name: d.name })}>YAML</Button>
                 <Button size="small" onClick={() => { setScaleTarget(d); scaleForm.setFieldsValue({ replicas: d.replicas }); }}>扩缩</Button>
                 <Popconfirm title="滚动重启？" onConfirm={() => restart(d)}><Button size="small">重启</Button></Popconfirm>
                 <Button size="small" onClick={() => { setExposeTarget(d); exposeForm.setFieldsValue({ name: d.name, type: 'ClusterIP', port: 80, protocol: 'TCP' }); }}>暴露</Button>
@@ -182,6 +202,8 @@ function Deployments({ cid, ns }: { cid: number; ns: string }) {
           </Space>
         </Form>
       </Modal>
+
+      <YamlDrawer cid={cid} target={yamlTarget} onClose={() => setYamlTarget(null)} onApplied={() => q.refetch()} />
     </>
   );
 }

@@ -1,0 +1,1225 @@
+openapi: 3.1.0
+info:
+  title: starport-panel API
+  version: v1
+  description: |
+    自托管 Kubernetes 面板的公开 HTTP API。所有调用方（内嵌 Web UI、CLI、上层系统）一视同仁地使用这一套接口。
+
+    - 前缀 `/api/v1`；响应一律 JSON（kubeconfig / 资源 YAML / 日志除外）。
+    - 错误统一为 `{"error":{"code":"...","message":"..."}}`，调用方按 `code` 分支，不解析 `message`。
+    - 鉴权：`Authorization: Bearer <token>`，或（仅 WebSocket）`?token=`。除 `POST /agents/register` 与 `/healthz` 外全部需要。
+    - 异步操作（装机 / 脚本 / 移除 / 升级）返回 `202 {"taskId"}`，用 `/tasks/{id}/logs` 增量拉日志直到 `task.status != running`。
+    - WebSocket 端点（终端 / exec）在此仅描述参数；帧协议见 docs/api.md「终端协议」。
+    - 本文件随二进制提供：`GET /api/v1/openapi.yaml`（需鉴权）。
+  license:
+    name: PolyForm Noncommercial 1.0.0
+    url: https://polyformproject.org/licenses/noncommercial/1.0.0
+servers:
+  - url: /api/v1
+security:
+  - bearer: []
+  - queryToken: []
+tags:
+  - name: meta
+  - name: nodes
+    description: 面板纳管的机器（agent 已注册）
+  - name: clusters
+    description: 集群生命周期（kubeadm 装机 / 接管已有集群）
+  - name: k8s
+    description: 集群内 Kubernetes 资源（面板经 kubeconfig 直连 apiserver）
+  - name: helm
+    description: Helm 仓库 / Chart / Release
+  - name: tasks
+  - name: tokens
+  - name: audit
+
+paths:
+  /version:
+    get:
+      tags: [meta]
+      summary: 面板版本
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { version: { type: string } }
+  /openapi.yaml:
+    get:
+      tags: [meta]
+      summary: 本 OpenAPI 文档
+      responses:
+        "200":
+          content:
+            application/yaml: { schema: { type: string } }
+
+  # ── agent ────────────────────────────────────────────────────────────────────
+  /agents/register:
+    post:
+      tags: [nodes]
+      summary: agent 引导注册（非人用）
+      description: agent 首次启动时以 bootstrap token 换取节点 ID 与长期令牌，之后经 gRPC 双向流连回面板。已存在的机器（按 machine_id，其次 hostname+internalIp）复用原节点记录并换发令牌。
+      security: []
+      parameters:
+        - in: header
+          name: X-Starport-Bootstrap-Token
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                facts: { $ref: "#/components/schemas/Facts" }
+                agentVersion: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodeId: { type: integer, format: int64 }
+                  agentToken: { type: string }
+                  heartbeatIntervalMs: { type: integer }
+                  grpcEndpoints: { type: array, items: { type: string } }
+                  grpcTls: { type: boolean }
+        "401": { $ref: "#/components/responses/Error" }
+
+  # ── 节点 ─────────────────────────────────────────────────────────────────────
+  /nodes:
+    get:
+      tags: [nodes]
+      summary: 全部节点
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Node" } }
+  /nodes/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [nodes]
+      summary: 单节点
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/Node" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [nodes]
+      summary: 删除节点记录
+      description: 只删面板记录并断开连接（其令牌随之失效）；节点仍是某集群成员时 `409 NODE_IN_CLUSTER`。机器上的 agent 服务需自行停掉，否则会重新注册成新节点。
+      responses:
+        "204": { description: 已删除 }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /nodes/{id}/exec:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [nodes]
+      summary: 在节点上执行脚本（异步任务）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [script]
+              properties:
+                script: { type: string, description: 交给 `sh -c` 的脚本 }
+                timeoutMs: { type: integer, format: int64, description: 0 = agent 默认 }
+      responses:
+        "202": { $ref: "#/components/responses/TaskAccepted" }
+        "409": { $ref: "#/components/responses/Error", description: NODE_OFFLINE }
+  /nodes/{id}/terminal:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [nodes]
+      summary: 节点 Web 终端（WebSocket）
+      description: 升级为 WebSocket；节点离线 `409 NODE_OFFLINE`。仅 Linux agent 支持 PTY。
+      parameters:
+        - { in: query, name: cols, schema: { type: integer, default: 120 } }
+        - { in: query, name: rows, schema: { type: integer, default: 30 } }
+        - { in: query, name: shell, schema: { type: string }, description: "`sh -c` 执行的脚本，默认 `exec bash -l`" }
+        - { in: query, name: tty, schema: { type: boolean, default: true } }
+      responses:
+        "101": { description: WebSocket }
+  /nodes/{id}/upgrade:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [nodes]
+      summary: 升级该节点的 starport-agent（异步任务）
+      description: 节点下载 `binUrl`、校验 `sha256`（可选）、试运行 `--version`、覆盖二进制，3 秒后重启 systemd 服务并以新版本重连。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpgradeRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/TaskAccepted" }
+        "409": { $ref: "#/components/responses/Error", description: NODE_OFFLINE }
+  /nodes/upgrade:
+    post:
+      tags: [nodes]
+      summary: 批量升级 agent
+      description: "`nodeIds` 为空则对全部在线节点下发；离线节点进入 `skipped`。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpgradeRequest" }
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tasks:
+                    type: object
+                    additionalProperties: { type: integer, format: int64 }
+                    description: nodeId → taskId
+                  skipped: { type: array, items: { type: integer, format: int64 } }
+
+  # ── 集群 ─────────────────────────────────────────────────────────────────────
+  /clusters:
+    get:
+      tags: [clusters]
+      summary: 全部集群
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Cluster" } } } } }
+    post:
+      tags: [clusters]
+      summary: 新建集群记录（尚无控制面）
+      description: 之后经 `POST /clusters/{id}/nodes` 先加一台 `first-master` 才会真正装机。`artifactMode=bundle` 必须给 `bundleUrl`；`online` 只支持 `cni=calico`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateClusterRequest" }
+      responses:
+        "201": { content: { application/json: { schema: { $ref: "#/components/schemas/Cluster" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error", description: CLUSTER_NAME_EXISTS }
+  /clusters/probe:
+    post:
+      tags: [clusters]
+      summary: 探测 kubeconfig（接管前预检，不入库）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kubeconfig]
+              properties: { kubeconfig: { type: string } }
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/ClusterProbe" } } } }
+        "400": { $ref: "#/components/responses/Error", description: KUBECONFIG_UNREACHABLE }
+  /clusters/import:
+    post:
+      tags: [clusters]
+      summary: 接管已有集群
+      description: 只需要 admin kubeconfig；先探测成功才入库，记录 `source=imported`、`status=ready`。这类集群只做资源管理，不能经面板加 / 移节点（`409 CLUSTER_IMPORTED`）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, kubeconfig]
+              properties:
+                name: { type: string, pattern: "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" }
+                kubeconfig: { type: string }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cluster: { $ref: "#/components/schemas/Cluster" }
+                  probe: { $ref: "#/components/schemas/ClusterProbe" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error", description: CLUSTER_NAME_EXISTS }
+  /clusters/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [clusters]
+      summary: 集群详情（含成员）
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/ClusterDetail" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [clusters]
+      summary: 删集群
+      description: 仍有成员且未 `force` → `409 CLUSTER_HAS_MEMBERS`；`force=true` 对每个在线成员发 `kubeadm reset` 任务并立即删记录。接管的集群只删记录，不动集群本身。
+      parameters:
+        - { in: query, name: force, schema: { type: boolean, default: false } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { taskIds: { type: array, items: { type: integer, format: int64 } } }
+        "409": { $ref: "#/components/responses/Error" }
+  /clusters/{id}/nodes:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [clusters]
+      summary: 把节点装进集群（异步任务）
+      description: |
+        顺序：先一台 `first-master`（集群 `created|failed` → `installing` → `ready`），之后才能 `join-master` / `worker`。
+        一台机只能属于一个集群；同集群上次 `failed` 的成员允许以同角色重试。join 凭据过期时面板自动在在线 master 上重新签发。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nodeId, role]
+              properties:
+                nodeId: { type: integer, format: int64 }
+                role: { $ref: "#/components/schemas/Role" }
+      responses:
+        "202": { $ref: "#/components/responses/TaskAccepted" }
+        "409": { $ref: "#/components/responses/Error", description: NODE_OFFLINE / NODE_ALREADY_MEMBER / CLUSTER_NOT_READY / CLUSTER_HAS_CONTROL_PLANE / CLUSTER_IMPORTED }
+  /clusters/{id}/nodes/{nodeId}:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { in: path, name: nodeId, required: true, schema: { type: integer, format: int64 } }
+    delete:
+      tags: [clusters]
+      summary: 移除成员（异步任务）
+      description: 在另一台在线 master 上 `drain` + `delete node`，再在该节点 `kubeadm reset`，成功后删成员。唯一控制面 `409 LAST_MASTER`；成员忙 `409 MEMBER_BUSY`；无在线 master `409 NO_ONLINE_MASTER`。
+      responses:
+        "202": { $ref: "#/components/responses/TaskAccepted" }
+        "409": { $ref: "#/components/responses/Error" }
+  /clusters/{id}/kubeconfig:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [clusters]
+      summary: admin kubeconfig
+      responses:
+        "200": { content: { application/yaml: { schema: { type: string } } } }
+        "409": { $ref: "#/components/responses/Error", description: CLUSTER_NOT_READY }
+    put:
+      tags: [clusters]
+      summary: 替换 kubeconfig（接管集群证书轮换后）
+      description: 保存前先探测一次；只允许 `source=imported` 的集群（`409 CLUSTER_NOT_IMPORTED`）。替换后面板丢弃该集群的客户端缓存。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kubeconfig]
+              properties: { kubeconfig: { type: string } }
+      responses:
+        "204": { description: 已替换 }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  # ── 集群内 Kubernetes 资源 ──────────────────────────────────────────────────
+  /clusters/{id}/k8s/nodes:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [k8s]
+      summary: K8s 节点
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/K8sNode" } } } } }
+        "409": { $ref: "#/components/responses/Error", description: CLUSTER_NOT_READY }
+        "502": { $ref: "#/components/responses/Error", description: APISERVER_UNREACHABLE }
+  /clusters/{id}/k8s/nodes/{name}/cordon:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/name" }]
+    post:
+      tags: [k8s]
+      summary: 停止调度（cordon）
+      responses: { "204": { description: ok } }
+  /clusters/{id}/k8s/nodes/{name}/uncordon:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/name" }]
+    post:
+      tags: [k8s]
+      summary: 恢复调度（uncordon）
+      responses: { "204": { description: ok } }
+  /clusters/{id}/k8s/metrics/nodes:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [k8s]
+      summary: 节点实时用量（需 metrics-server）
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/NodeUsage" } } } } }
+        "404": { $ref: "#/components/responses/Error", description: NO_METRICS_SERVER }
+  /clusters/{id}/k8s/metrics/pods:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/namespace" }]
+    get:
+      tags: [k8s]
+      summary: Pod 实时用量（需 metrics-server）
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/PodUsage" } } } } }
+        "404": { $ref: "#/components/responses/Error", description: NO_METRICS_SERVER }
+  /clusters/{id}/k8s/namespaces:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [k8s]
+      summary: 命名空间
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Namespace" } } } } }
+  /clusters/{id}/k8s/pods:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/namespace" }]
+    get:
+      tags: [k8s]
+      summary: Pod 列表
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Pod" } } } } }
+  /clusters/{id}/k8s/namespaces/{ns}/pods/{name}:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/ns" }, { $ref: "#/components/parameters/name" }]
+    delete:
+      tags: [k8s]
+      summary: 删 Pod（由控制器重建）
+      responses: { "204": { description: ok } }
+  /clusters/{id}/k8s/namespaces/{ns}/pods/{name}/logs:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/ns" }, { $ref: "#/components/parameters/name" }]
+    get:
+      tags: [k8s]
+      summary: 容器日志
+      parameters:
+        - { in: query, name: container, schema: { type: string }, description: 多容器 Pod 必填 }
+        - { in: query, name: tail, schema: { type: integer, default: 500 } }
+        - { in: query, name: previous, schema: { type: boolean, default: false } }
+        - { in: query, name: follow, schema: { type: boolean, default: false }, description: 分块流式直到断开或容器结束 }
+      responses:
+        "200": { content: { text/plain: { schema: { type: string } } } }
+  /clusters/{id}/k8s/namespaces/{ns}/pods/{name}/exec:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/ns" }, { $ref: "#/components/parameters/name" }]
+    get:
+      tags: [k8s]
+      summary: 容器 Web 终端（WebSocket）
+      parameters:
+        - { in: query, name: container, schema: { type: string } }
+        - { in: query, name: cmd, schema: { type: array, items: { type: string } }, description: 可重复给 argv；默认 bash，不存在回落 sh }
+        - { in: query, name: cols, schema: { type: integer } }
+        - { in: query, name: rows, schema: { type: integer } }
+      responses:
+        "101": { description: WebSocket }
+  /clusters/{id}/k8s/deployments:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/namespace" }]
+    get:
+      tags: [k8s]
+      summary: Deployment 列表
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Deployment" } } } } }
+  /clusters/{id}/k8s/namespaces/{ns}/deployments/{name}/scale:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/ns" }, { $ref: "#/components/parameters/name" }]
+    post:
+      tags: [k8s]
+      summary: 扩缩
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [replicas]
+              properties: { replicas: { type: integer, minimum: 0 } }
+      responses: { "204": { description: ok } }
+  /clusters/{id}/k8s/namespaces/{ns}/deployments/{name}/restart:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/ns" }, { $ref: "#/components/parameters/name" }]
+    post:
+      tags: [k8s]
+      summary: 滚动重启（kubectl rollout restart）
+      responses: { "204": { description: ok } }
+  /clusters/{id}/k8s/namespaces/{ns}/deployments/{name}/expose:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/ns" }, { $ref: "#/components/parameters/name" }]
+    post:
+      tags: [k8s]
+      summary: 为 Deployment 建 / 更新 Service
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [port]
+              properties:
+                name: { type: string, description: 默认同 Deployment 名 }
+                type: { type: string, enum: [ClusterIP, NodePort, LoadBalancer], default: ClusterIP }
+                port: { type: integer }
+                targetPort: { type: integer, description: 默认同 port }
+                nodePort: { type: integer, description: 仅 NodePort；0 = 自动分配 }
+                protocol: { type: string, enum: [TCP, UDP], default: TCP }
+      responses:
+        "201": { content: { application/json: { schema: { $ref: "#/components/schemas/Service" } } } }
+  /clusters/{id}/k8s/services:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/namespace" }]
+    get:
+      tags: [k8s]
+      summary: Service 列表
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Service" } } } } }
+  /clusters/{id}/k8s/namespaces/{ns}/services/{name}:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/ns" }, { $ref: "#/components/parameters/name" }]
+    delete:
+      tags: [k8s]
+      summary: 删 Service
+      responses: { "204": { description: ok } }
+  /clusters/{id}/k8s/ingresses:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/namespace" }]
+    get:
+      tags: [k8s]
+      summary: Ingress 列表
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Ingress" } } } } }
+  /clusters/{id}/k8s/events:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/namespace" }]
+    get:
+      tags: [k8s]
+      summary: 事件（最近发生倒序）
+      parameters:
+        - { in: query, name: object, schema: { type: string }, description: "`Kind/name`，只看该对象" }
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/K8sEvent" } } } } }
+  /clusters/{id}/k8s/apply:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [k8s]
+      summary: server-side apply 多文档 YAML
+      description: 等价 `kubectl apply --server-side --force-conflicts`（字段管理者 `starport-panel`）。无 `metadata.namespace` 的 namespaced 资源落到 `namespace` 参数（默认 default）。任一文档失败即停止，响应同时带已成功的 `applied` 与 `error`，已成功的不回滚。
+      parameters:
+        - { in: query, name: namespace, schema: { type: string, default: default } }
+      requestBody:
+        required: true
+        content:
+          application/yaml: { schema: { type: string } }
+          application/json:
+            schema:
+              type: object
+              required: [manifest]
+              properties:
+                manifest: { type: string }
+                namespace: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Applied" }
+  /clusters/{id}/k8s/delete:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [k8s]
+      summary: 按 YAML 删对象（kubectl delete -f，不存在忽略）
+      parameters:
+        - { in: query, name: namespace, schema: { type: string, default: default } }
+      requestBody:
+        required: true
+        content:
+          application/yaml: { schema: { type: string } }
+          application/json:
+            schema:
+              type: object
+              required: [manifest]
+              properties:
+                manifest: { type: string }
+                namespace: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { deleted: { type: array, items: { $ref: "#/components/schemas/Applied" } } }
+  /clusters/{id}/k8s/resource-kinds:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [k8s]
+      summary: 集群支持的全部可 list 资源类型（含 CRD）
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ResourceKind" } } } } }
+  /clusters/{id}/k8s/resources/{group}/{version}/{resource}:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/group" }, { $ref: "#/components/parameters/version" }, { $ref: "#/components/parameters/resource" }, { $ref: "#/components/parameters/namespace" }]
+    get:
+      tags: [k8s]
+      summary: 任意 GVR 列表（只带元数据）
+      parameters:
+        - { in: query, name: labelSelector, schema: { type: string } }
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ResourceItem" } } } } }
+  /clusters/{id}/k8s/resources/{group}/{version}/{resource}/{name}:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/group" }, { $ref: "#/components/parameters/version" }, { $ref: "#/components/parameters/resource" }, { $ref: "#/components/parameters/name" }, { $ref: "#/components/parameters/namespace" }]
+    get:
+      tags: [k8s]
+      summary: 单对象完整 YAML（去掉 managedFields）
+      responses:
+        "200": { content: { application/yaml: { schema: { type: string } } } }
+    delete:
+      tags: [k8s]
+      summary: 删对象
+      responses: { "204": { description: ok } }
+
+  # ── Helm ─────────────────────────────────────────────────────────────────────
+  /clusters/{id}/helm/repos:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [helm]
+      summary: 该集群配置的 Chart 仓库
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/HelmRepo" } } } } }
+    post:
+      tags: [helm]
+      summary: 添加仓库（会拉取一次 index.yaml 验证）
+      description: 暂只支持 http(s) 仓库；`oci://` 返回 `400 OCI_UNSUPPORTED`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, url]
+              properties:
+                name: { type: string, pattern: "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" }
+                url: { type: string, format: uri }
+                username: { type: string }
+                password: { type: string }
+      responses:
+        "201": { content: { application/json: { schema: { $ref: "#/components/schemas/HelmRepo" } } } }
+        "400": { $ref: "#/components/responses/Error", description: INVALID_ARGUMENT / OCI_UNSUPPORTED / REPO_UNREACHABLE }
+        "409": { $ref: "#/components/responses/Error", description: REPO_NAME_EXISTS }
+  /clusters/{id}/helm/repos/{repo}:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/repo" }]
+    delete:
+      tags: [helm]
+      summary: 删仓库（不影响已部署 release）
+      responses: { "204": { description: ok } }
+  /clusters/{id}/helm/repos/{repo}/refresh:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/repo" }]
+    post:
+      tags: [helm]
+      summary: 强制刷新索引（默认缓存 10 分钟）
+      responses:
+        "204": { description: ok }
+        "502": { $ref: "#/components/responses/Error", description: REPO_UNREACHABLE }
+  /clusters/{id}/helm/charts:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [helm]
+      summary: 搜索 Chart（每个 chart 只给最新版本）
+      parameters:
+        - { in: query, name: q, schema: { type: string }, description: 名称 / 描述 / 关键词子串，空 = 全部 }
+        - { in: query, name: repo, schema: { type: string }, description: 只搜该仓库 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  charts: { type: array, items: { $ref: "#/components/schemas/HelmChart" } }
+                  errors:
+                    type: object
+                    additionalProperties: { type: string }
+                    description: 索引拉取失败的仓库 → 原因；其余仓库结果正常返回
+  /clusters/{id}/helm/charts/{repo}/{chart}:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/repo" }, { $ref: "#/components/parameters/chart" }]
+    get:
+      tags: [helm]
+      summary: Chart 详情（含默认 values 与 README）
+      parameters:
+        - { in: query, name: version, schema: { type: string }, description: 默认最新 }
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/HelmChartDetail" } } } }
+        "404": { $ref: "#/components/responses/Error", description: CHART_NOT_FOUND }
+  /clusters/{id}/helm/charts/{repo}/{chart}/versions:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/repo" }, { $ref: "#/components/parameters/chart" }]
+    get:
+      tags: [helm]
+      summary: Chart 全部版本（新 → 旧）
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/HelmChartVersion" } } } } }
+  /clusters/{id}/helm/releases:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/namespace" }]
+    get:
+      tags: [helm]
+      summary: Release 列表
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/HelmRelease" } } } } }
+    post:
+      tags: [helm]
+      summary: 安装（同步；`wait=true` 时最长等 timeoutSeconds）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HelmReleaseRequest" }
+      responses:
+        "201": { content: { application/json: { schema: { $ref: "#/components/schemas/HelmRelease" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error", description: CHART_NOT_FOUND }
+        "502": { $ref: "#/components/responses/Error", description: HELM_ERROR（Helm / apiserver 侧失败，如 release 已存在、渲染失败） }
+  /clusters/{id}/helm/releases/{ns}/{name}:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/ns" }, { $ref: "#/components/parameters/name" }]
+    put:
+      tags: [helm]
+      summary: 升级（values 整体替换，不与旧值合并）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/HelmReleaseRequest"
+              description: namespace / name 取路径，正文里的忽略
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/HelmRelease" } } } }
+        "404": { $ref: "#/components/responses/Error", description: RELEASE_NOT_FOUND / CHART_NOT_FOUND }
+    delete:
+      tags: [helm]
+      summary: 卸载
+      responses:
+        "204": { description: ok }
+        "404": { $ref: "#/components/responses/Error", description: RELEASE_NOT_FOUND }
+  /clusters/{id}/helm/releases/{ns}/{name}/rollback:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/ns" }, { $ref: "#/components/parameters/name" }]
+    post:
+      tags: [helm]
+      summary: 回滚到指定修订
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [revision]
+              properties: { revision: { type: integer, minimum: 1 } }
+      responses: { "204": { description: ok } }
+  /clusters/{id}/helm/releases/{ns}/{name}/history:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/ns" }, { $ref: "#/components/parameters/name" }]
+    get:
+      tags: [helm]
+      summary: 修订历史（新 → 旧）
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/HelmRelease" } } } } }
+  /clusters/{id}/helm/releases/{ns}/{name}/values:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/ns" }, { $ref: "#/components/parameters/name" }]
+    get:
+      tags: [helm]
+      summary: 当前 release 的用户 values（YAML 文本）
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { values: { type: string } }
+
+  # ── 任务 ─────────────────────────────────────────────────────────────────────
+  /tasks:
+    get:
+      tags: [tasks]
+      summary: 最近任务（倒序）
+      parameters:
+        - { in: query, name: nodeId, schema: { type: integer, format: int64 } }
+        - { in: query, name: limit, schema: { type: integer, default: 100 } }
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Task" } } } } }
+  /tasks/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [tasks]
+      summary: 任务
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/Task" } } } }
+  /tasks/{id}/logs:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [tasks]
+      summary: 增量拉日志
+      description: 用最后一条 `seq` 作 `after` 续拉；`task.status != running` 即结束。
+      parameters:
+        - { in: query, name: after, schema: { type: integer, format: int64, default: 0 } }
+        - { in: query, name: limit, schema: { type: integer, default: 1000 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task: { $ref: "#/components/schemas/Task" }
+                  logs: { type: array, items: { $ref: "#/components/schemas/TaskLog" } }
+  /tasks/{id}/cancel:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [tasks]
+      summary: 取消运行中任务
+      responses:
+        "204": { description: ok }
+        "409": { $ref: "#/components/responses/Error", description: TASK_NOT_RUNNING }
+
+  # ── 令牌 / 审计 ──────────────────────────────────────────────────────────────
+  /tokens:
+    get:
+      tags: [tokens]
+      summary: 全部 API 令牌（含已吊销）
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/APIToken" } } } } }
+    post:
+      tags: [tokens]
+      summary: 签发令牌（明文仅此一次返回）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties: { name: { type: string } }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { $ref: "#/components/schemas/APIToken" }
+                  plain: { type: string, description: "spt_… 明文" }
+  /tokens/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    delete:
+      tags: [tokens]
+      summary: 吊销（立即失效，幂等）
+      responses: { "204": { description: ok } }
+  /audit:
+    get:
+      tags: [audit]
+      summary: 写操作审计（倒序）
+      description: 记录所有 `POST / PUT / PATCH / DELETE` 的 `/api/**` 调用（不含请求体）。用最后一条 `id` 作 `before` 翻页。
+      parameters:
+        - { in: query, name: before, schema: { type: integer, format: int64 }, description: 只取 id 小于此值的 }
+        - { in: query, name: limit, schema: { type: integer, default: 100, maximum: 500 } }
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/AuditEntry" } } } } }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: 库内令牌（`starport-panel token create`）或静态令牌（`serve --api-token`）
+    queryToken:
+      type: apiKey
+      in: query
+      name: token
+      description: 仅供浏览器 WebSocket（无法自定义 Header）
+
+  parameters:
+    id: { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    name: { in: path, name: name, required: true, schema: { type: string } }
+    ns: { in: path, name: ns, required: true, schema: { type: string } }
+    repo: { in: path, name: repo, required: true, schema: { type: string } }
+    chart: { in: path, name: chart, required: true, schema: { type: string } }
+    group: { in: path, name: group, required: true, schema: { type: string }, description: API 组；核心组用 `core` }
+    version: { in: path, name: version, required: true, schema: { type: string } }
+    resource: { in: path, name: resource, required: true, schema: { type: string }, description: 复数资源名（pods / deployments / certificates…） }
+    namespace: { in: query, name: namespace, schema: { type: string }, description: 空 = 全部命名空间 }
+
+  responses:
+    Error:
+      description: 结构化错误
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TaskAccepted:
+      description: 已作为异步任务受理
+      content:
+        application/json:
+          schema:
+            type: object
+            properties: { taskId: { type: integer, format: int64 } }
+    Applied:
+      description: apply 结果
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              applied: { type: array, items: { $ref: "#/components/schemas/Applied" } }
+              error: { $ref: "#/components/schemas/ErrorBody", description: 中途失败时同时出现 }
+
+  schemas:
+    ErrorBody:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: |
+            稳定的机器可读码，常见：UNAUTHENTICATED、INVALID_ARGUMENT、NOT_FOUND、NODE_OFFLINE、NODE_ALREADY_MEMBER、NODE_IN_CLUSTER、
+            CLUSTER_NAME_EXISTS、CLUSTER_NOT_READY、CLUSTER_HAS_CONTROL_PLANE、CLUSTER_HAS_MEMBERS、CLUSTER_IMPORTED、CLUSTER_NOT_IMPORTED、
+            KUBECONFIG_UNREACHABLE、LAST_MASTER、MEMBER_BUSY、NO_ONLINE_MASTER、JOIN_REFRESH_FAILED、TASK_NOT_RUNNING、
+            APISERVER_UNREACHABLE、NO_METRICS_SERVER、K8S_<Reason>、NODE_NO_IP、REPO_NAME_EXISTS、REPO_UNREACHABLE、OCI_UNSUPPORTED、
+            CHART_NOT_FOUND、RELEASE_NOT_FOUND、HELM_ERROR、INTERNAL
+        message: { type: string }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { $ref: "#/components/schemas/ErrorBody" }
+
+    Facts:
+      type: object
+      properties:
+        hostname: { type: string }
+        internalIp: { type: string }
+        os: { type: string }
+        arch: { type: string }
+        kernel: { type: string }
+        cpuCores: { type: integer }
+        memBytes: { type: integer, format: int64 }
+        cpuUsedPercent: { type: number }
+        memUsedPercent: { type: number }
+        machineId: { type: string, description: /etc/machine-id；注册去重用 }
+    Node:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        facts: { $ref: "#/components/schemas/Facts" }
+        agentVersion: { type: string }
+        online: { type: boolean }
+        registeredAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+    UpgradeRequest:
+      type: object
+      required: [binUrl]
+      properties:
+        binUrl: { type: string, format: uri, description: 新 agent 二进制的 http(s) 地址 }
+        sha256: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
+        nodeIds: { type: array, items: { type: integer, format: int64 }, description: 仅批量接口；空 = 全部在线节点 }
+
+    Role:
+      type: string
+      enum: [first-master, join-master, worker]
+    ClusterStatus:
+      type: string
+      enum: [created, installing, ready, failed]
+    MemberStatus:
+      type: string
+      enum: [installing, ready, failed, removing]
+    Cluster:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        k8sVersion: { type: string }
+        podCIDR: { type: string }
+        serviceCIDR: { type: string }
+        controlPlaneEndpoint: { type: string }
+        vip: { type: string }
+        vipInterface: { type: string }
+        cni: { type: string }
+        cniVersion: { type: string }
+        addons: { type: array, items: { type: string } }
+        artifactMode: { type: string, enum: [bundle, online] }
+        bundleUrl: { type: string }
+        useCnMirror: { type: boolean }
+        status: { $ref: "#/components/schemas/ClusterStatus" }
+        source: { type: string, enum: [kubeadm, imported], description: kubeadm = 面板装机；imported = 只有 kubeconfig 的接管集群 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Member:
+      type: object
+      properties:
+        clusterId: { type: integer, format: int64 }
+        nodeId: { type: integer, format: int64 }
+        role: { $ref: "#/components/schemas/Role" }
+        status: { $ref: "#/components/schemas/MemberStatus" }
+        error: { type: string }
+        taskId: { type: integer, format: int64 }
+        updatedAt: { type: string, format: date-time }
+    ClusterDetail:
+      allOf:
+        - $ref: "#/components/schemas/Cluster"
+        - type: object
+          properties:
+            members: { type: array, items: { $ref: "#/components/schemas/Member" } }
+    ClusterProbe:
+      type: object
+      properties:
+        version: { type: string }
+        endpoint: { type: string }
+        nodeCount: { type: integer }
+        podCIDR: { type: string }
+        serviceCIDR: { type: string }
+    CreateClusterRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, pattern: "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" }
+        k8sVersion: { type: string, default: v1.35.7 }
+        podCIDR: { type: string, default: 10.244.0.0/16 }
+        serviceCIDR: { type: string, default: 10.96.0.0/12 }
+        controlPlaneEndpoint: { type: string, description: 空时：有 vip 用 vip:6443，否则首 master 内网 IP:6443 回填 }
+        vip: { type: string }
+        vipInterface: { type: string }
+        cni: { type: string, enum: [cilium, calico], default: cilium }
+        cniVersion: { type: string }
+        addons: { type: array, items: { type: string, enum: [ingress-nginx, metrics-server, cert-manager] } }
+        artifactMode: { type: string, enum: [bundle, online], default: bundle }
+        bundleUrl: { type: string, format: uri }
+        useCnMirror: { type: boolean }
+
+    K8sNode:
+      type: object
+      properties:
+        name: { type: string }
+        ready: { type: boolean }
+        unschedulable: { type: boolean }
+        roles: { type: array, items: { type: string } }
+        internalIp: { type: string }
+        kubeletVersion: { type: string }
+        osImage: { type: string }
+        kernel: { type: string }
+        containerRuntime: { type: string }
+        cpu: { type: string }
+        memory: { type: string }
+        pods: { type: string }
+        createdAt: { type: string, format: date-time }
+    NodeUsage:
+      type: object
+      properties:
+        name: { type: string }
+        cpuMilli: { type: integer, format: int64 }
+        cpuCapMilli: { type: integer, format: int64 }
+        memBytes: { type: integer, format: int64 }
+        memCapBytes: { type: integer, format: int64 }
+        cpuPercent: { type: integer }
+        memPercent: { type: integer }
+        timestamp: { type: string, format: date-time }
+        windowSeconds: { type: integer }
+    PodUsage:
+      type: object
+      properties:
+        namespace: { type: string }
+        name: { type: string }
+        cpuMilli: { type: integer, format: int64 }
+        memBytes: { type: integer, format: int64 }
+        timestamp: { type: string, format: date-time }
+        containers:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              cpuMilli: { type: integer, format: int64 }
+              memBytes: { type: integer, format: int64 }
+    Namespace:
+      type: object
+      properties:
+        name: { type: string }
+        status: { type: string }
+        createdAt: { type: string, format: date-time }
+    Container:
+      type: object
+      properties:
+        name: { type: string }
+        image: { type: string }
+        ready: { type: boolean }
+        state: { type: string }
+    Pod:
+      type: object
+      properties:
+        namespace: { type: string }
+        name: { type: string }
+        phase: { type: string }
+        ready: { type: string, example: "1/2" }
+        restarts: { type: integer }
+        node: { type: string }
+        podIp: { type: string }
+        containers: { type: array, items: { $ref: "#/components/schemas/Container" } }
+        createdAt: { type: string, format: date-time }
+    Deployment:
+      type: object
+      properties:
+        namespace: { type: string }
+        name: { type: string }
+        replicas: { type: integer }
+        ready: { type: integer }
+        updated: { type: integer }
+        available: { type: integer }
+        images: { type: array, items: { type: string } }
+        labels: { type: object, additionalProperties: { type: string } }
+        createdAt: { type: string, format: date-time }
+    ServicePort:
+      type: object
+      properties:
+        name: { type: string }
+        protocol: { type: string }
+        port: { type: integer }
+        targetPort: { type: string }
+        nodePort: { type: integer }
+    Service:
+      type: object
+      properties:
+        namespace: { type: string }
+        name: { type: string }
+        type: { type: string }
+        clusterIp: { type: string }
+        externalIps: { type: array, items: { type: string } }
+        ports: { type: array, items: { $ref: "#/components/schemas/ServicePort" } }
+        selector: { type: object, additionalProperties: { type: string } }
+        createdAt: { type: string, format: date-time }
+    Ingress:
+      type: object
+      properties:
+        namespace: { type: string }
+        name: { type: string }
+        class: { type: string }
+        rules:
+          type: array
+          items:
+            type: object
+            properties:
+              host: { type: string }
+              path: { type: string }
+              service: { type: string }
+              port: { type: string }
+        tlsHosts: { type: array, items: { type: string } }
+        addresses: { type: array, items: { type: string } }
+        createdAt: { type: string, format: date-time }
+    K8sEvent:
+      type: object
+      properties:
+        type: { type: string }
+        reason: { type: string }
+        message: { type: string }
+        object: { type: string, example: Pod/nginx-abc }
+        count: { type: integer }
+        firstSeen: { type: string, format: date-time }
+        lastSeen: { type: string, format: date-time }
+    ResourceKind:
+      type: object
+      properties:
+        group: { type: string }
+        version: { type: string }
+        resource: { type: string }
+        kind: { type: string }
+        namespaced: { type: boolean }
+        verbs: { type: array, items: { type: string } }
+    ResourceItem:
+      type: object
+      properties:
+        namespace: { type: string }
+        name: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+        createdAt: { type: string, format: date-time }
+    Applied:
+      type: object
+      properties:
+        kind: { type: string }
+        namespace: { type: string }
+        name: { type: string }
+
+    HelmRepo:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        clusterId: { type: integer, format: int64 }
+        name: { type: string }
+        url: { type: string }
+        username: { type: string }
+        hasAuth: { type: boolean }
+        createdAt: { type: string, format: date-time }
+    HelmChart:
+      type: object
+      properties:
+        repo: { type: string }
+        name: { type: string }
+        version: { type: string, description: 最新版本 }
+        appVersion: { type: string }
+        description: { type: string }
+        icon: { type: string }
+        home: { type: string }
+        keywords: { type: array, items: { type: string } }
+        deprecated: { type: boolean }
+        versions: { type: integer, description: 版本数 }
+    HelmChartVersion:
+      type: object
+      properties:
+        version: { type: string }
+        appVersion: { type: string }
+        created: { type: string, format: date-time }
+    HelmChartDetail:
+      allOf:
+        - $ref: "#/components/schemas/HelmChart"
+        - type: object
+          properties:
+            readme: { type: string }
+            values: { type: string, description: 默认 values.yaml（保留注释） }
+    HelmRelease:
+      type: object
+      properties:
+        name: { type: string }
+        namespace: { type: string }
+        revision: { type: integer }
+        status: { type: string, description: deployed / failed / pending-install / pending-upgrade / superseded / uninstalling… }
+        chart: { type: string, example: nginx-15.1.0 }
+        chartName: { type: string }
+        chartVersion: { type: string }
+        appVersion: { type: string }
+        description: { type: string }
+        updated: { type: string, format: date-time }
+        notes: { type: string }
+    HelmReleaseRequest:
+      type: object
+      required: [namespace, name, repo, chart]
+      properties:
+        namespace: { type: string }
+        name: { type: string, pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" }
+        repo: { type: string }
+        chart: { type: string }
+        version: { type: string, description: 默认最新 }
+        values: { type: string, description: values.yaml 文本 }
+        createNamespace: { type: boolean }
+        wait: { type: boolean }
+        timeoutSeconds: { type: integer, default: 300 }
+
+    Task:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        kind: { type: string, enum: [install, exec, remove, destroy, upgrade] }
+        nodeId: { type: integer, format: int64 }
+        clusterId: { type: integer, format: int64 }
+        status: { type: string, enum: [running, succeeded, failed, cancelled] }
+        exitCode: { type: integer }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+    TaskLog:
+      type: object
+      properties:
+        seq: { type: integer, format: int64 }
+        at: { type: string, format: date-time }
+        line: { type: string }
+
+    APIToken:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        prefix: { type: string, description: 明文前 12 位，便于辨认 }
+        createdAt: { type: string, format: date-time }
+        lastUsedAt: { type: string, format: date-time }
+        revokedAt: { type: string, format: date-time }
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        at: { type: string, format: date-time }
+        tokenId: { type: integer, format: int64, description: 静态令牌 / 关闭鉴权时为 0 }
+        tokenName: { type: string, description: 库内令牌名；静态令牌 "static"；关闭鉴权 "anonymous" }
+        method: { type: string }
+        path: { type: string }
+        status: { type: integer }
+        remoteIp: { type: string }
+        durationMs: { type: integer }

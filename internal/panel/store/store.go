@@ -56,11 +56,72 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: 初始化 schema: %w", err)
 	}
-	return &Store{db: db}, nil
+	st := &Store{db: db}
+	if err := st.migrate(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: 迁移: %w", err)
+	}
+	return st, nil
+}
+
+// migrations 对已有表的增量列变更：schema.sql 只负责建表，加列在这里（ADD COLUMN 不支持 IF NOT EXISTS）。
+var migrations = []struct{ table, column, ddl string }{
+	{"nodes", "machine_id", `ALTER TABLE nodes ADD COLUMN machine_id TEXT NOT NULL DEFAULT ''`},
+	{"clusters", "source", `ALTER TABLE clusters ADD COLUMN source TEXT NOT NULL DEFAULT 'kubeadm'`},
+}
+
+func (s *Store) migrate() error {
+	for _, m := range migrations {
+		has, err := s.hasColumn(m.table, m.column)
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.Exec(m.ddl); err != nil {
+				return fmt.Errorf("%s.%s: %w", m.table, m.column, err)
+			}
+		}
+	}
+	// 加列后再建依赖该列的索引
+	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_nodes_machine ON nodes(machine_id)`)
+	return err
+}
+
+func (s *Store) hasColumn(table, column string) (bool, error) {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // Close 关闭数据库。
 func (s *Store) Close() error { return s.db.Close() }
+
+// Backup 用 VACUUM INTO 生成一致性快照（面板运行中亦可，WAL 下不阻塞写）。目标文件须不存在。
+func (s *Store) Backup(ctx context.Context, path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("store: 目标已存在: %s", path)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, filepath.ToSlash(path))
+	return err
+}
 
 // ── 时间编码：统一 RFC3339Nano UTC 文本，空串表示零值 ──
 

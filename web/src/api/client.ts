@@ -61,6 +61,7 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
 export const api = {
   get: <T>(path: string, signal?: AbortSignal) => request<T>(path, { signal }),
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: 'POST', body }),
+  put: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PUT', body }),
   postYaml: <T>(path: string, yaml: string) => request<T>(path, { method: 'POST', body: yaml, contentType: 'application/yaml' }),
   del: <T = void>(path: string) => request<T>(path, { method: 'DELETE' }),
 };

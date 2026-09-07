@@ -167,6 +167,57 @@ func normalize(req CreateRequest) (store.Cluster, error) {
 	return c, nil
 }
 
+// ImportRequest 接管已有集群：name + kubeconfig；其余由调用方探测后填入（K8sVersion / Endpoint / PodCIDR）。
+type ImportRequest struct {
+	Name        string
+	Kubeconfig  string
+	K8sVersion  string
+	Endpoint    string
+	PodCIDR     string
+	ServiceCIDR string
+}
+
+// Import 建一条 source=imported、status=ready 的集群记录。这类集群只做资源管理，不能经面板加 / 移节点。
+func (s *Service) Import(ctx context.Context, req ImportRequest) (store.Cluster, error) {
+	c := store.Cluster{
+		Name:                 strings.TrimSpace(req.Name),
+		K8sVersion:           firstNonEmpty(req.K8sVersion, "unknown"),
+		PodCIDR:              req.PodCIDR,
+		ServiceCIDR:          req.ServiceCIDR,
+		ControlPlaneEndpoint: strings.TrimPrefix(strings.TrimPrefix(req.Endpoint, "https://"), "http://"),
+		CNI:                  "unknown",
+		Kubeconfig:           req.Kubeconfig,
+	}
+	if c.Name == "" {
+		return store.Cluster{}, badRequest("INVALID_ARGUMENT", "name 必填")
+	}
+	if strings.TrimSpace(c.Kubeconfig) == "" {
+		return store.Cluster{}, badRequest("INVALID_ARGUMENT", "kubeconfig 必填")
+	}
+	if err := s.store.ImportCluster(ctx, &c); err != nil {
+		if store.IsConflict(err) {
+			return store.Cluster{}, conflict("CLUSTER_NAME_EXISTS", "集群名 %q 已存在", c.Name)
+		}
+		return store.Cluster{}, err
+	}
+	return c, nil
+}
+
+// UpdateKubeconfig 替换接管集群的 kubeconfig（证书轮换后）；kubeadm 集群的凭据由面板自己维护，不允许覆盖。
+func (s *Service) UpdateKubeconfig(ctx context.Context, id uint64, kubeconfig string) error {
+	c, err := s.store.GetCluster(ctx, id)
+	if err != nil {
+		return err
+	}
+	if c.Source != store.SourceImported {
+		return conflict("CLUSTER_NOT_IMPORTED", "只有接管的集群可以替换 kubeconfig")
+	}
+	if strings.TrimSpace(kubeconfig) == "" {
+		return badRequest("INVALID_ARGUMENT", "kubeconfig 必填")
+	}
+	return s.store.SetKubeconfig(ctx, id, kubeconfig)
+}
+
 // Get 集群详情。
 func (s *Service) Get(ctx context.Context, id uint64) (store.Cluster, error) {
 	return s.store.GetCluster(ctx, id)
@@ -201,6 +252,9 @@ func (s *Service) AddNode(ctx context.Context, clusterID, nodeID uint64, role st
 	c, err := s.store.GetCluster(ctx, clusterID)
 	if err != nil {
 		return 0, err
+	}
+	if c.Source == store.SourceImported {
+		return 0, conflict("CLUSTER_IMPORTED", "接管的集群不能经面板加节点（面板没有它的 kubeadm 凭据）")
 	}
 	node, err := s.store.GetNode(ctx, nodeID)
 	if err != nil {

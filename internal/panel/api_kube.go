@@ -61,6 +61,56 @@ func (s *Server) clusterK8sNodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, nodes)
 }
 
+// k8sNodeMetrics GET .../k8s/metrics/nodes；未装 metrics-server → 404 NO_METRICS_SERVER。
+func (s *Server) k8sNodeMetrics(w http.ResponseWriter, r *http.Request) {
+	id, kc, ok := s.kubeconfigFor(w, r)
+	if !ok {
+		return
+	}
+	out, err := s.kube.NodeMetrics(r.Context(), id, kc)
+	if err != nil {
+		writeErr(w, metricsErr(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// k8sPodMetrics GET .../k8s/metrics/pods?namespace=
+func (s *Server) k8sPodMetrics(w http.ResponseWriter, r *http.Request) {
+	id, kc, ok := s.kubeconfigFor(w, r)
+	if !ok {
+		return
+	}
+	out, err := s.kube.PodMetrics(r.Context(), id, kc, r.URL.Query().Get("namespace"))
+	if err != nil {
+		writeErr(w, metricsErr(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func metricsErr(err error) error {
+	if errors.Is(err, kube.ErrNoMetricsServer) {
+		return &cluster.Error{Code: "NO_METRICS_SERVER", Message: err.Error(), Status: 404}
+	}
+	return kubeErr(err)
+}
+
+func (s *Server) k8sCordon(w http.ResponseWriter, r *http.Request)   { s.setUnschedulable(w, r, true) }
+func (s *Server) k8sUncordon(w http.ResponseWriter, r *http.Request) { s.setUnschedulable(w, r, false) }
+
+func (s *Server) setUnschedulable(w http.ResponseWriter, r *http.Request, v bool) {
+	id, kc, ok := s.kubeconfigFor(w, r)
+	if !ok {
+		return
+	}
+	if err := s.kube.SetUnschedulable(r.Context(), id, kc, r.PathValue("name"), v); err != nil {
+		writeErr(w, kubeErr(err))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) k8sNamespaces(w http.ResponseWriter, r *http.Request) {
 	id, kc, ok := s.kubeconfigFor(w, r)
 	if !ok {

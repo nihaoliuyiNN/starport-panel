@@ -160,6 +160,8 @@ message Facts {
   uint64 mem_bytes = 7;
   double cpu_used_percent = 8;
   double mem_used_percent = 9;
+  // 机器唯一标识（Linux /etc/machine-id；无则空）。面板注册时优先按它去重，避免换 IP / 改主机名产生重复节点。
+  string machine_id = 10;
 }
 
 // ───────────────────────────── 装机 ─────────────────────────────

@@ -41,6 +41,7 @@ type Cluster struct {
 	BundleURL            string    `json:"bundleUrl,omitempty"`
 	UseCNMirror          bool      `json:"useCnMirror"`
 	Status               string    `json:"status"`
+	Source               string    `json:"source"` // kubeadm（面板装机）| imported（只给 kubeconfig 接管，不能加节点）
 	Kubeconfig           string    `json:"-"`
 	Join                 JoinCreds `json:"-"`
 	CreatedAt            time.Time `json:"createdAt"`
@@ -68,7 +69,7 @@ type Member struct {
 
 const clusterCols = `id, name, k8s_version, pod_cidr, service_cidr, control_plane_endpoint, vip, vip_interface,
 	cni, cni_version, addons, artifact_mode, bundle_url, use_cn_mirror, status, kubeconfig,
-	join_token, join_ca_cert_hash, join_certificate_key, join_issued_at, created_at, updated_at`
+	join_token, join_ca_cert_hash, join_certificate_key, join_issued_at, created_at, updated_at, source`
 
 func scanCluster(r interface{ Scan(...any) error }) (Cluster, error) {
 	var c Cluster
@@ -76,7 +77,7 @@ func scanCluster(r interface{ Scan(...any) error }) (Cluster, error) {
 	var cn int
 	err := r.Scan(&c.ID, &c.Name, &c.K8sVersion, &c.PodCIDR, &c.ServiceCIDR, &c.ControlPlaneEndpoint, &c.VIP, &c.VIPInterface,
 		&c.CNI, &c.CNIVersion, &addons, &c.ArtifactMode, &c.BundleURL, &cn, &c.Status, &c.Kubeconfig,
-		&c.Join.Token, &c.Join.CACertHash, &c.Join.CertificateKey, &issued, &created, &updated)
+		&c.Join.Token, &c.Join.CACertHash, &c.Join.CertificateKey, &issued, &created, &updated, &c.Source)
 	if err != nil {
 		return Cluster{}, err
 	}
@@ -108,8 +109,41 @@ func (s *Store) CreateCluster(ctx context.Context, c *Cluster) error {
 	id, _ := res.LastInsertId()
 	c.ID = uint64(id)
 	c.Status = ClusterCreated
+	c.Source = SourceKubeadm
 	c.CreatedAt, c.UpdatedAt = parseTS(t), parseTS(t)
 	return nil
+}
+
+// 集群来源。
+const (
+	SourceKubeadm  = "kubeadm"  // 面板经 agent 用 kubeadm 装出来的，可加/移节点
+	SourceImported = "imported" // 只提供 kubeconfig 接管的已有集群，仅做资源管理
+)
+
+// ImportCluster 接管已有集群：只有 kubeconfig，直接 ready。K8sVersion 由调用方探测后填入。
+func (s *Store) ImportCluster(ctx context.Context, c *Cluster) error {
+	t := now()
+	res, err := s.db.ExecContext(ctx, `INSERT INTO clusters (name, k8s_version, pod_cidr, service_cidr, control_plane_endpoint,
+		cni, addons, artifact_mode, status, kubeconfig, source, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		c.Name, c.K8sVersion, c.PodCIDR, c.ServiceCIDR, c.ControlPlaneEndpoint,
+		c.CNI, "[]", "", ClusterReady, c.Kubeconfig, SourceImported, t, t)
+	if err != nil {
+		return err
+	}
+	id, _ := res.LastInsertId()
+	c.ID = uint64(id)
+	c.Status = ClusterReady
+	c.Source = SourceImported
+	c.Addons = []string{}
+	c.CreatedAt, c.UpdatedAt = parseTS(t), parseTS(t)
+	return nil
+}
+
+// SetKubeconfig 更新接管集群的 kubeconfig（证书轮换后重新导入）。
+func (s *Store) SetKubeconfig(ctx context.Context, id uint64, kubeconfig string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE clusters SET kubeconfig = ?, updated_at = ? WHERE id = ?`, kubeconfig, now(), id)
+	return err
 }
 
 // ListClusters 全部集群。

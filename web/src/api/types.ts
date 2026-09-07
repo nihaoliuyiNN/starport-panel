@@ -10,6 +10,7 @@ export interface Facts {
   memBytes: number;
   cpuUsedPercent: number;
   memUsedPercent: number;
+  machineId?: string;
 }
 
 export interface Node {
@@ -41,8 +42,17 @@ export interface Cluster {
   bundleUrl: string;
   useCnMirror: boolean;
   status: ClusterStatus;
+  source: 'kubeadm' | 'imported';
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ClusterProbe {
+  version: string;
+  endpoint: string;
+  nodeCount: number;
+  podCIDR?: string;
+  serviceCIDR?: string;
 }
 
 export interface Member {
@@ -226,4 +236,101 @@ export interface Applied {
   kind: string;
   namespace?: string;
   name: string;
+}
+
+export interface NodeUsage {
+  name: string;
+  cpuMilli: number;
+  cpuCapMilli: number;
+  memBytes: number;
+  memCapBytes: number;
+  cpuPercent: number;
+  memPercent: number;
+  timestamp: string;
+  windowSeconds: number;
+}
+
+export interface PodUsage {
+  namespace: string;
+  name: string;
+  cpuMilli: number;
+  memBytes: number;
+  timestamp: string;
+  containers: { name: string; cpuMilli: number; memBytes: number }[];
+}
+
+// ── 审计 ──
+
+export interface AuditEntry {
+  id: number;
+  at: string;
+  tokenId?: number;
+  tokenName: string;
+  method: string;
+  path: string;
+  status: number;
+  remoteIp: string;
+  durationMs: number;
+}
+
+// ── Helm ──
+
+export interface HelmRepo {
+  id: number;
+  clusterId: number;
+  name: string;
+  url: string;
+  username?: string;
+  hasAuth: boolean;
+  createdAt: string;
+}
+
+export interface HelmChart {
+  repo: string;
+  name: string;
+  version: string;
+  appVersion: string;
+  description: string;
+  icon?: string;
+  home?: string;
+  keywords?: string[];
+  deprecated?: boolean;
+  versions: number;
+}
+
+export interface HelmChartVersion {
+  version: string;
+  appVersion: string;
+  created: string;
+}
+
+export interface HelmChartDetail extends HelmChart {
+  readme: string;
+  values: string;
+}
+
+export interface HelmRelease {
+  name: string;
+  namespace: string;
+  revision: number;
+  status: string;
+  chart: string;
+  chartName: string;
+  chartVersion: string;
+  appVersion: string;
+  description?: string;
+  updated: string;
+  notes?: string;
+}
+
+export interface HelmReleaseRequest {
+  namespace: string;
+  name: string;
+  repo: string;
+  chart: string;
+  version?: string;
+  values?: string;
+  createNamespace?: boolean;
+  wait?: boolean;
+  timeoutSeconds?: number;
 }

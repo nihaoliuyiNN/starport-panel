@@ -121,15 +121,40 @@ func (h *Hub) Connect(stream pb.NodeAgentService_ConnectServer) error {
 	// 出站唯一写者
 	go c.writeLoop()
 
-	for {
-		f, err := stream.Recv()
-		if err != nil {
-			if status.Code(err) != codes.Canceled {
-				log.Printf("[agenthub] 连接结束 nodeId=%d: %v", nodeID, err)
+	// 入站放到独立 goroutine，主循环同时监听 c.done：被踢（重连 / Kick）时 Connect 立即返回，
+	// gRPC 随之取消流上下文，Recv 也会退出。
+	type recvMsg struct {
+		f   *pb.AgentFrame
+		err error
+	}
+	recvCh := make(chan recvMsg)
+	go func() {
+		for {
+			f, err := stream.Recv()
+			select {
+			case recvCh <- recvMsg{f, err}:
+			case <-c.done:
+				return
 			}
-			return nil
+			if err != nil {
+				return
+			}
 		}
-		h.dispatch(c, f)
+	}()
+
+	for {
+		select {
+		case <-c.done:
+			return nil
+		case m := <-recvCh:
+			if m.err != nil {
+				if status.Code(m.err) != codes.Canceled {
+					log.Printf("[agenthub] 连接结束 nodeId=%d: %v", nodeID, m.err)
+				}
+				return nil
+			}
+			h.dispatch(c, m.f)
+		}
 	}
 }
 
@@ -154,6 +179,17 @@ func (h *Hub) attach(c *conn) {
 	if old != nil {
 		log.Printf("[agenthub] nodeId=%d 重连，踢掉旧连接", c.nodeID)
 		old.close()
+	}
+}
+
+// Kick 主动断开某节点的连接（如节点记录被删除：其令牌已失效，重连会被拒）。不在线则无操作。
+func (h *Hub) Kick(nodeID uint64) {
+	h.mu.Lock()
+	c := h.conns[nodeID]
+	h.mu.Unlock()
+	if c != nil {
+		log.Printf("[agenthub] 主动断开 nodeId=%d", nodeID)
+		c.close()
 	}
 }
 
@@ -465,6 +501,7 @@ func factsFromPB(p *pb.Facts) agent.Facts {
 		MemBytes:       p.GetMemBytes(),
 		CPUUsedPercent: p.GetCpuUsedPercent(),
 		MemUsedPercent: p.GetMemUsedPercent(),
+		MachineID:      p.GetMachineId(),
 	}
 }
 

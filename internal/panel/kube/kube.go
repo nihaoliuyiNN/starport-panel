@@ -14,6 +14,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
@@ -74,6 +75,60 @@ func (c *Client) Nodes(ctx context.Context, clusterID uint64, kubeconfig string)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// ClusterInfo 探测已有集群得到的基本信息（接管前校验用）。
+type ClusterInfo struct {
+	Version     string `json:"version"`  // 如 v1.35.7
+	Endpoint    string `json:"endpoint"` // kubeconfig 里的 server
+	NodeCount   int    `json:"nodeCount"`
+	PodCIDR     string `json:"podCIDR,omitempty"`     // 从首个节点 spec.podCIDR 推测（可能为空）
+	ServiceCIDR string `json:"serviceCIDR,omitempty"` // 从 kubernetes Service ClusterIP 无法可靠推出，留空
+}
+
+// Probe 用 kubeconfig 直连一次：拿版本、节点数与入口。不入缓存（集群尚未有 ID）。
+func Probe(ctx context.Context, kubeconfig string) (ClusterInfo, error) {
+	cfg, err := clientcmd.RESTConfigFromKubeConfig([]byte(kubeconfig))
+	if err != nil {
+		return ClusterInfo{}, fmt.Errorf("kube: 解析 kubeconfig: %w", err)
+	}
+	cfg.UserAgent = "starport-panel"
+	cs, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return ClusterInfo{}, fmt.Errorf("kube: 建客户端: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	ver, err := cs.Discovery().ServerVersion()
+	if err != nil {
+		return ClusterInfo{}, fmt.Errorf("kube: 连接 apiserver: %w", err)
+	}
+	info := ClusterInfo{Version: ver.GitVersion, Endpoint: cfg.Host}
+	nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return ClusterInfo{}, fmt.Errorf("kube: 列节点（kubeconfig 权限不足？）: %w", err)
+	}
+	info.NodeCount = len(nodes.Items)
+	if len(nodes.Items) > 0 {
+		info.PodCIDR = nodes.Items[0].Spec.PodCIDR
+	}
+	return info, nil
+}
+
+// SetUnschedulable 封锁 / 解封节点（kubectl cordon / uncordon）。
+func (c *Client) SetUnschedulable(ctx context.Context, clusterID uint64, kubeconfig, name string, unschedulable bool) error {
+	cs, err := c.clientset(clusterID, kubeconfig)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	patch := fmt.Sprintf(`{"spec":{"unschedulable":%t}}`, unschedulable)
+	_, err = cs.CoreV1().Nodes().Patch(ctx, name, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	if err != nil {
+		return fmt.Errorf("kube: 更新节点调度状态: %w", err)
+	}
+	return nil
 }
 
 // Forget 丢弃某集群缓存（集群删除时）。

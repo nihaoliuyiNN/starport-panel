@@ -1,7 +1,8 @@
 import { api } from './client';
 import type {
-  APIToken, Applied, Cluster, ClusterDetail, CreateClusterRequest, Deployment, Ingress, K8sEvent, K8sNode,
-  Namespace, Node, Pod, ResourceItem, ResourceKind, Role, Service, Task, TaskLog,
+  APIToken, Applied, AuditEntry, Cluster, ClusterDetail, ClusterProbe, CreateClusterRequest, Deployment,
+  HelmChart, HelmChartDetail, HelmChartVersion, HelmRelease, HelmReleaseRequest, HelmRepo, Ingress, K8sEvent, K8sNode,
+  Namespace, Node, NodeUsage, Pod, PodUsage, ResourceItem, ResourceKind, Role, Service, Task, TaskLog,
 } from './types';
 
 export * from './client';
@@ -18,12 +19,23 @@ export const nodesApi = {
   list: () => api.get<Node[]>('/nodes'),
   get: (id: number) => api.get<Node>(`/nodes/${id}`),
   exec: (id: number, script: string, timeoutMs?: number) => api.post<{ taskId: number }>(`/nodes/${id}/exec`, { script, timeoutMs }),
+  remove: (id: number) => api.del(`/nodes/${id}`),
+  upgrade: (id: number, binUrl: string, sha256?: string) => api.post<{ taskId: number }>(`/nodes/${id}/upgrade`, { binUrl, sha256 }),
+  upgradeAll: (binUrl: string, sha256?: string, nodeIds?: number[]) =>
+    api.post<{ tasks: Record<string, number>; skipped: number[] }>('/nodes/upgrade', { binUrl, sha256, nodeIds }),
+};
+
+export const auditApi = {
+  list: (before?: number, limit = 100) => api.get<AuditEntry[]>(`/audit${q({ before, limit })}`),
 };
 
 export const clustersApi = {
   list: () => api.get<Cluster[]>('/clusters'),
   get: (id: number) => api.get<ClusterDetail>(`/clusters/${id}`),
   create: (req: CreateClusterRequest) => api.post<Cluster>('/clusters', req),
+  probe: (kubeconfig: string) => api.post<ClusterProbe>('/clusters/probe', { kubeconfig }),
+  import: (name: string, kubeconfig: string) => api.post<{ cluster: Cluster; probe: ClusterProbe }>('/clusters/import', { name, kubeconfig }),
+  updateKubeconfig: (id: number, kubeconfig: string) => api.put<void>(`/clusters/${id}/kubeconfig`, { kubeconfig }),
   remove: (id: number, force: boolean) => api.del<{ taskIds: number[] }>(`/clusters/${id}${q({ force: force ? 'true' : undefined })}`),
   addNode: (id: number, nodeId: number, role: Role) => api.post<{ taskId: number }>(`/clusters/${id}/nodes`, { nodeId, role }),
   removeNode: (id: number, nodeId: number) => api.del<{ taskId: number }>(`/clusters/${id}/nodes/${nodeId}`),
@@ -48,6 +60,10 @@ export const k8sApi = (cid: number) => {
   const gvr = (g: string, v: string, r: string) => `${base}/resources/${g || 'core'}/${v}/${r}`;
   return {
     nodes: () => api.get<K8sNode[]>(`${base}/nodes`),
+    cordon: (name: string) => api.post<void>(`${base}/nodes/${name}/cordon`),
+    uncordon: (name: string) => api.post<void>(`${base}/nodes/${name}/uncordon`),
+    nodeMetrics: () => api.get<NodeUsage[]>(`${base}/metrics/nodes`),
+    podMetrics: (namespace?: string) => api.get<PodUsage[]>(`${base}/metrics/pods${q({ namespace })}`),
     namespaces: () => api.get<Namespace[]>(`${base}/namespaces`),
     pods: (namespace?: string) => api.get<Pod[]>(`${base}/pods${q({ namespace })}`),
     deletePod: (ns: string, name: string) => api.del(`${base}/namespaces/${ns}/pods/${name}`),
@@ -68,5 +84,25 @@ export const k8sApi = (cid: number) => {
     deleteResource: (g: string, v: string, r: string, name: string, namespace?: string) => api.del(`${gvr(g, v, r)}/${name}${q({ namespace })}`),
     logsPath: (ns: string, name: string) => `${base}/namespaces/${ns}/pods/${name}/logs`,
     execPath: (ns: string, name: string) => `${base}/namespaces/${ns}/pods/${name}/exec`,
+  };
+};
+
+export const helmApi = (cid: number) => {
+  const base = `/clusters/${cid}/helm`;
+  return {
+    repos: () => api.get<HelmRepo[]>(`${base}/repos`),
+    addRepo: (req: { name: string; url: string; username?: string; password?: string }) => api.post<HelmRepo>(`${base}/repos`, req),
+    deleteRepo: (name: string) => api.del(`${base}/repos/${name}`),
+    refreshRepo: (name: string) => api.post<void>(`${base}/repos/${name}/refresh`),
+    search: (qs?: string, repo?: string) => api.get<{ charts: HelmChart[]; errors: Record<string, string> }>(`${base}/charts${q({ q: qs, repo })}`),
+    chart: (repo: string, chart: string, version?: string) => api.get<HelmChartDetail>(`${base}/charts/${repo}/${chart}${q({ version })}`),
+    versions: (repo: string, chart: string) => api.get<HelmChartVersion[]>(`${base}/charts/${repo}/${chart}/versions`),
+    releases: (namespace?: string) => api.get<HelmRelease[]>(`${base}/releases${q({ namespace })}`),
+    install: (req: HelmReleaseRequest) => api.post<HelmRelease>(`${base}/releases`, req),
+    upgrade: (ns: string, name: string, req: Omit<HelmReleaseRequest, 'namespace' | 'name'>) => api.put<HelmRelease>(`${base}/releases/${ns}/${name}`, req),
+    uninstall: (ns: string, name: string) => api.del(`${base}/releases/${ns}/${name}`),
+    rollback: (ns: string, name: string, revision: number) => api.post<void>(`${base}/releases/${ns}/${name}/rollback`, { revision }),
+    history: (ns: string, name: string) => api.get<HelmRelease[]>(`${base}/releases/${ns}/${name}/history`),
+    values: (ns: string, name: string) => api.get<{ values: string }>(`${base}/releases/${ns}/${name}/values`),
   };
 };

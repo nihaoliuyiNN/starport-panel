@@ -8,7 +8,7 @@ import { TaskStatusTag } from '../components/tags';
 import TaskLogDrawer from '../components/TaskLogDrawer';
 import { fmtTime, fromNow } from '../util';
 
-const kindText: Record<string, string> = { install: '装机', exec: '执行脚本', remove: '移除节点', destroy: '删集群重置' };
+const kindText: Record<string, string> = { install: '装机', exec: '执行脚本', remove: '移除节点', destroy: '删集群重置', upgrade: '升级 agent' };
 
 export default function Tasks() {
   const tasks = useQuery({ queryKey: ['tasks'], queryFn: () => tasksApi.list(undefined, 200), refetchInterval: 5000 });

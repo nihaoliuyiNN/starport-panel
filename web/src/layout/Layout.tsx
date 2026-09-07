@@ -1,5 +1,5 @@
 import { Layout as AntLayout, Menu, Button, Space, Typography, Tooltip } from 'antd';
-import { ClusterOutlined, DesktopOutlined, KeyOutlined, LogoutOutlined, UnorderedListOutlined } from '@ant-design/icons';
+import { AuditOutlined, ClusterOutlined, DesktopOutlined, KeyOutlined, LogoutOutlined, UnorderedListOutlined } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { api, setToken } from '../api';
@@ -11,6 +11,7 @@ const items = [
   { key: '/clusters', icon: <ClusterOutlined />, label: '集群' },
   { key: '/tasks', icon: <UnorderedListOutlined />, label: '任务' },
   { key: '/tokens', icon: <KeyOutlined />, label: 'API 令牌' },
+  { key: '/audit', icon: <AuditOutlined />, label: '审计' },
 ];
 
 export default function Layout() {

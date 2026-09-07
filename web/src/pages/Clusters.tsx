@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { App, Button, Card, Form, Input, Modal, Select, Space, Switch, Table, Typography } from 'antd';
-import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Alert, App, Button, Card, Descriptions, Form, Input, Modal, Select, Space, Switch, Table, Tag, Typography } from 'antd';
+import { ImportOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from 'react-router-dom';
-import { clustersApi, errMsg, type Cluster, type CreateClusterRequest } from '../api';
+import { clustersApi, errMsg, type Cluster, type ClusterProbe, type CreateClusterRequest } from '../api';
 import { ClusterStatusTag } from '../components/tags';
 import { fmtTime } from '../util';
 
@@ -18,6 +18,44 @@ export default function Clusters() {
   const [form] = Form.useForm<CreateClusterRequest>();
   const mode = Form.useWatch('artifactMode', form);
   const [saving, setSaving] = useState(false);
+
+  // 导入已有集群
+  const [importOpen, setImportOpen] = useState(false);
+  const [importForm] = Form.useForm<{ name: string; kubeconfig: string }>();
+  const [probe, setProbe] = useState<ClusterProbe | null>(null);
+  const [probing, setProbing] = useState(false);
+
+  const doProbe = async () => {
+    const kc = importForm.getFieldValue('kubeconfig') as string;
+    if (!kc?.trim()) return message.warning('请先粘贴 kubeconfig');
+    setProbing(true);
+    try {
+      setProbe(await clustersApi.probe(kc));
+    } catch (e) {
+      setProbe(null);
+      message.error(errMsg(e));
+    } finally {
+      setProbing(false);
+    }
+  };
+
+  const doImport = async () => {
+    const v = await importForm.validateFields();
+    setSaving(true);
+    try {
+      const res = await clustersApi.import(v.name, v.kubeconfig);
+      message.success(`已接管集群 ${res.cluster.name}（${res.probe.version}，${res.probe.nodeCount} 节点）`);
+      setImportOpen(false);
+      importForm.resetFields();
+      setProbe(null);
+      await qc.invalidateQueries({ queryKey: ['clusters'] });
+      nav(`/clusters/${res.cluster.id}`);
+    } catch (e) {
+      message.error(errMsg(e));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const submit = async () => {
     const v = await form.validateFields();
@@ -43,6 +81,7 @@ export default function Clusters() {
         extra={
           <Space>
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>新建集群</Button>
+            <Button icon={<ImportOutlined />} onClick={() => setImportOpen(true)}>导入已有集群</Button>
             <Button icon={<ReloadOutlined />} onClick={() => clusters.refetch()} loading={clusters.isFetching}>刷新</Button>
           </Space>
         }
@@ -56,12 +95,12 @@ export default function Clusters() {
           pagination={false}
           columns={[
             { title: 'ID', dataIndex: 'id', width: 60 },
-            { title: '名称', render: (_, c) => <Link to={`/clusters/${c.id}`}><b>{c.name}</b></Link> },
+            { title: '名称', render: (_, c) => <Space><Link to={`/clusters/${c.id}`}><b>{c.name}</b></Link>{c.source === 'imported' && <Tag>接管</Tag>}</Space> },
             { title: '状态', width: 100, render: (_, c) => <ClusterStatusTag status={c.status} /> },
             { title: 'Kubernetes', dataIndex: 'k8sVersion', width: 110 },
-            { title: 'CNI', width: 130, render: (_, c) => `${c.cni} ${c.cniVersion}` },
+            { title: 'CNI', width: 130, render: (_, c) => (c.source === 'imported' ? '-' : `${c.cni} ${c.cniVersion}`) },
             { title: '控制面入口', dataIndex: 'controlPlaneEndpoint', render: (v: string) => v || <Typography.Text type="secondary">首 master 安装时回填</Typography.Text> },
-            { title: '制品', width: 90, render: (_, c) => (c.artifactMode === 'bundle' ? '离线包' : '在线') },
+            { title: '制品', width: 90, render: (_, c) => (c.source === 'imported' ? '-' : c.artifactMode === 'bundle' ? '离线包' : '在线') },
             { title: '创建时间', width: 170, render: (_, c) => fmtTime(c.createdAt) },
           ]}
         />
@@ -107,6 +146,44 @@ export default function Clusters() {
             <Select mode="multiple" options={ADDONS.map((a) => ({ value: a, label: a }))} />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title="导入已有集群"
+        open={importOpen}
+        onCancel={() => { setImportOpen(false); setProbe(null); }}
+        onOk={doImport}
+        okText="接管"
+        okButtonProps={{ disabled: !probe }}
+        confirmLoading={saving}
+        width={680}
+        destroyOnClose
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="接管只需要 admin kubeconfig：面板据此管理集群内资源、部署应用。这类集群没有 kubeadm 凭据，不能经面板加 / 移节点。"
+        />
+        <Form form={importForm} layout="vertical">
+          <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入集群名' }, { pattern: /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/, message: '小写字母、数字、连字符' }]}>
+            <Input placeholder="legacy-prod" />
+          </Form.Item>
+          <Form.Item name="kubeconfig" label="kubeconfig" rules={[{ required: true, message: '请粘贴 kubeconfig' }]}>
+            <Input.TextArea rows={10} style={{ fontFamily: 'monospace', fontSize: 12 }} placeholder="apiVersion: v1&#10;kind: Config&#10;clusters: ..." onChange={() => setProbe(null)} />
+          </Form.Item>
+        </Form>
+        <Space align="start">
+          <Button onClick={doProbe} loading={probing}>连接测试</Button>
+          {probe && (
+            <Descriptions size="small" column={1} style={{ marginLeft: 8 }}>
+              <Descriptions.Item label="版本">{probe.version}</Descriptions.Item>
+              <Descriptions.Item label="入口">{probe.endpoint}</Descriptions.Item>
+              <Descriptions.Item label="节点数">{probe.nodeCount}</Descriptions.Item>
+              {probe.podCIDR && <Descriptions.Item label="Pod CIDR">{probe.podCIDR}</Descriptions.Item>}
+            </Descriptions>
+          )}
+        </Space>
       </Modal>
     </>
   );

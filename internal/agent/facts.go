@@ -27,7 +27,21 @@ func collectFacts() Facts {
 	f.MemBytes = memTotalBytes()
 	f.CPUUsedPercent = cpuUsedPercent()
 	f.MemUsedPercent = memUsedPercent()
+	f.MachineID = machineID()
 	return f
+}
+
+// machineID 读 /etc/machine-id（systemd 机器都有；容器 / 克隆镜像可能重复或缺失，面板对空值退回 hostname+IP 去重）。
+func machineID() string {
+	for _, p := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
+		b, err := os.ReadFile(p)
+		if err == nil {
+			if id := strings.TrimSpace(string(b)); len(id) >= 8 {
+				return id
+			}
+		}
+	}
+	return ""
 }
 
 // CPU 采样基线：跨两次心跳算差值，避免每次都阻塞采样；首次无基线时短采一次拿即时值。

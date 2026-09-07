@@ -13,6 +13,7 @@ import (
 
 	"starport-panel/internal/panel/agenthub"
 	"starport-panel/internal/panel/cluster"
+	"starport-panel/internal/panel/kube"
 	"starport-panel/internal/panel/store"
 	"starport-panel/internal/panel/task"
 	"starport-panel/internal/panel/ui"
@@ -25,6 +26,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"version": s.cfg.Version})
 	})
+	mux.HandleFunc("GET /api/v1/openapi.yaml", s.openapi)
 
 	// agent 引导注册
 	mux.Handle("POST "+agenthub.RegisterPath, s.hub.RegisterHandler())
@@ -32,20 +34,30 @@ func (s *Server) routes() http.Handler {
 	// 节点
 	mux.HandleFunc("GET /api/v1/nodes", s.listNodes)
 	mux.HandleFunc("GET /api/v1/nodes/{id}", s.getNode)
+	mux.HandleFunc("DELETE /api/v1/nodes/{id}", s.deleteNode)
 	mux.HandleFunc("POST /api/v1/nodes/{id}/exec", s.execNode)
 	mux.HandleFunc("GET /api/v1/nodes/{id}/terminal", s.nodeTerminal) // WebSocket
+	mux.HandleFunc("POST /api/v1/nodes/upgrade", s.upgradeNodes)      // 批量升级 agent
+	mux.HandleFunc("POST /api/v1/nodes/{id}/upgrade", s.upgradeNode)
 
 	// 集群
 	mux.HandleFunc("GET /api/v1/clusters", s.listClusters)
 	mux.HandleFunc("POST /api/v1/clusters", s.createCluster)
+	mux.HandleFunc("POST /api/v1/clusters/import", s.importCluster) // 接管已有集群（kubeconfig）
+	mux.HandleFunc("POST /api/v1/clusters/probe", s.probeKubeconfig)
 	mux.HandleFunc("GET /api/v1/clusters/{id}", s.getCluster)
 	mux.HandleFunc("DELETE /api/v1/clusters/{id}", s.deleteCluster)
 	mux.HandleFunc("POST /api/v1/clusters/{id}/nodes", s.addClusterNode)
 	mux.HandleFunc("DELETE /api/v1/clusters/{id}/nodes/{nodeId}", s.removeClusterNode)
 	mux.HandleFunc("GET /api/v1/clusters/{id}/kubeconfig", s.clusterKubeconfig)
+	mux.HandleFunc("PUT /api/v1/clusters/{id}/kubeconfig", s.updateKubeconfig)
 
 	// 集群内 Kubernetes 资源（经 kubeconfig 直连 apiserver）
 	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/nodes", s.clusterK8sNodes)
+	mux.HandleFunc("POST /api/v1/clusters/{id}/k8s/nodes/{name}/cordon", s.k8sCordon)
+	mux.HandleFunc("POST /api/v1/clusters/{id}/k8s/nodes/{name}/uncordon", s.k8sUncordon)
+	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/metrics/nodes", s.k8sNodeMetrics) // 需 metrics-server
+	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/metrics/pods", s.k8sPodMetrics)
 	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/namespaces", s.k8sNamespaces)
 	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/pods", s.k8sPods)
 	mux.HandleFunc("DELETE /api/v1/clusters/{id}/k8s/namespaces/{ns}/pods/{name}", s.k8sDeletePod)
@@ -67,10 +79,29 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/resources/{group}/{version}/{resource}/{name}", s.k8sGetResource)
 	mux.HandleFunc("DELETE /api/v1/clusters/{id}/k8s/resources/{group}/{version}/{resource}/{name}", s.k8sDeleteResource)
 
+	// Helm 应用：仓库按集群配置，release 直接经 kubeconfig 操作
+	mux.HandleFunc("GET /api/v1/clusters/{id}/helm/repos", s.helmListRepos)
+	mux.HandleFunc("POST /api/v1/clusters/{id}/helm/repos", s.helmAddRepo)
+	mux.HandleFunc("DELETE /api/v1/clusters/{id}/helm/repos/{repo}", s.helmDeleteRepo)
+	mux.HandleFunc("POST /api/v1/clusters/{id}/helm/repos/{repo}/refresh", s.helmRefreshRepo)
+	mux.HandleFunc("GET /api/v1/clusters/{id}/helm/charts", s.helmSearch) // ?q=&repo=
+	mux.HandleFunc("GET /api/v1/clusters/{id}/helm/charts/{repo}/{chart}", s.helmChartDetail)
+	mux.HandleFunc("GET /api/v1/clusters/{id}/helm/charts/{repo}/{chart}/versions", s.helmChartVersions)
+	mux.HandleFunc("GET /api/v1/clusters/{id}/helm/releases", s.helmListReleases) // ?namespace=
+	mux.HandleFunc("POST /api/v1/clusters/{id}/helm/releases", s.helmInstall)
+	mux.HandleFunc("PUT /api/v1/clusters/{id}/helm/releases/{ns}/{name}", s.helmUpgrade)
+	mux.HandleFunc("DELETE /api/v1/clusters/{id}/helm/releases/{ns}/{name}", s.helmUninstall)
+	mux.HandleFunc("POST /api/v1/clusters/{id}/helm/releases/{ns}/{name}/rollback", s.helmRollback)
+	mux.HandleFunc("GET /api/v1/clusters/{id}/helm/releases/{ns}/{name}/history", s.helmHistory)
+	mux.HandleFunc("GET /api/v1/clusters/{id}/helm/releases/{ns}/{name}/values", s.helmValues)
+
 	// API 令牌（持有任一有效令牌即可管理；面板是单角色管理员模型）
 	mux.HandleFunc("GET /api/v1/tokens", s.listTokens)
 	mux.HandleFunc("POST /api/v1/tokens", s.createToken)
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.revokeToken)
+
+	// 审计（写操作记录）
+	mux.HandleFunc("GET /api/v1/audit", s.listAudit)
 
 	// 任务
 	mux.HandleFunc("GET /api/v1/tasks", s.listTasks)
@@ -175,6 +206,75 @@ func (s *Server) createCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, c)
+}
+
+// importCluster POST /api/v1/clusters/import {name, kubeconfig}：先直连探测（版本 / 节点数），通过才入库。
+func (s *Server) importCluster(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name       string `json:"name"`
+		Kubeconfig string `json:"kubeconfig"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Kubeconfig) == "" {
+		writeErr(w, &cluster.Error{Code: "INVALID_ARGUMENT", Message: "name 与 kubeconfig 必填", Status: 400})
+		return
+	}
+	info, err := kube.Probe(r.Context(), req.Kubeconfig)
+	if err != nil {
+		writeErr(w, &cluster.Error{Code: "KUBECONFIG_UNREACHABLE", Message: err.Error(), Status: 400})
+		return
+	}
+	c, err := s.clusters.Import(r.Context(), cluster.ImportRequest{
+		Name: req.Name, Kubeconfig: req.Kubeconfig,
+		K8sVersion: info.Version, Endpoint: info.Endpoint, PodCIDR: info.PodCIDR,
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"cluster": c, "probe": info})
+}
+
+// probeKubeconfig POST /api/v1/clusters/probe {kubeconfig}：只探测不入库（导入表单预检）。
+func (s *Server) probeKubeconfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Kubeconfig string `json:"kubeconfig"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	info, err := kube.Probe(r.Context(), req.Kubeconfig)
+	if err != nil {
+		writeErr(w, &cluster.Error{Code: "KUBECONFIG_UNREACHABLE", Message: err.Error(), Status: 400})
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+// updateKubeconfig PUT /api/v1/clusters/{id}/kubeconfig {kubeconfig}：接管集群证书轮换后替换。
+func (s *Server) updateKubeconfig(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Kubeconfig string `json:"kubeconfig"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if _, err := kube.Probe(r.Context(), req.Kubeconfig); err != nil {
+		writeErr(w, &cluster.Error{Code: "KUBECONFIG_UNREACHABLE", Message: err.Error(), Status: 400})
+		return
+	}
+	if err := s.clusters.UpdateKubeconfig(r.Context(), id, req.Kubeconfig); err != nil {
+		writeErr(w, err)
+		return
+	}
+	s.kube.Forget(id)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type clusterDetail struct {
