@@ -1,0 +1,6 @@
+# 单包，此文件只承载 pnpm 设置（pnpm ≥ 10 不再读 package.json#pnpm / .npmrc）。
+# allowBuilds：允许 esbuild 的 postinstall 安装平台二进制；其余包默认不跑脚本。
+packages:
+  - .
+allowBuilds:
+  esbuild: true

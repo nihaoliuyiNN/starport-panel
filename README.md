@@ -8,7 +8,7 @@
 - **结构化装机**：面板下发的是结构化 `InstallSpec`，不是一坨脚本；预检 / 阶段 / 失败码都是数据，可重试、可断点。
 - **契约先行**：面板 ↔ agent 走 gRPC 双向流，`.proto` 是唯一事实来源。
 
-> 当前状态：**Phase 3a —— API 层完整可用（鉴权、集群生命周期、工作负载、网络暴露、通用资源）**。Web UI、Helm 见下方路线图。
+> 当前状态：**Phase 3b —— 单二进制可部署面板（内嵌 Web UI + 完整 API）**。Helm 应用市场见下方路线图。
 
 ## 组成
 
@@ -16,7 +16,9 @@
 |---|---|
 | `cmd/starport-panel` | 控制面进程：HTTP API（:8080）+ agent gRPC 入口（:9192） |
 | `cmd/starport-agent` | 节点侧代理：注册、心跳、执行脚本、内置装机引擎、终端会话 |
-| `internal/panel` | 面板装配层（HTTP 路由、gRPC 服务端） |
+| `internal/panel` | 面板装配层（HTTP 路由、鉴权、gRPC 服务端） |
+| `internal/panel/ui` | 内嵌 Web UI 构建产物（`go:embed`），SPA 回退 |
+| `web/` | Web UI 源码：React + Vite + Ant Design + xterm.js，`make ui` 构建进面板二进制 |
 | `internal/panel/agenthub` | agent 连接中枢：连接表、请求关联、会话路由、注册端点 |
 | `internal/panel/store` | SQLite 持久化：节点、集群、成员、任务与日志 |
 | `internal/panel/cluster` | 集群编排：首 master init → 接管 kubeconfig / join 凭据 → master/worker 加入 → 节点移除 / 删集群 |
@@ -33,9 +35,11 @@
 
 ```bash
 # 1. 起面板，签发一个 API 令牌（本机开发也可 --insecure-no-auth 跳过鉴权）
+make ui                                                                           # 构建 Web UI（需 node + pnpm；跳过则只有 API）
 go run ./cmd/starport-panel serve --bootstrap-token dev --data-dir /tmp/sp-panel
 go run ./cmd/starport-panel token create --name dev --data-dir /tmp/sp-panel   # 打印 spt_...
 export H='Authorization: Bearer spt_...'
+# 浏览器打开 http://127.0.0.1:8080 ，用该令牌登录即可完成下面全部操作；以下是等价的 API 调用
 
 # 2. 另一个终端起 agent（Linux 节点上跑真实装机；本机只验证链路）
 go run ./cmd/starport-agent --server http://127.0.0.1:8080 --token dev --data-dir /tmp/sp-agent
@@ -96,12 +100,15 @@ agent 只做出站连接；面板沿同一条流反向下发 `exec` / `install` 
 - [x] Phase 1：SQLite 持久化、装集群编排（首 master → join，join 凭据自动刷新）、kubeconfig 接管、client-go 节点视图、异步任务与日志
 - [x] Phase 2：节点移除 / 删集群、节点 Web 终端、工作负载视图（命名空间 / Pod / Deployment）、扩缩 / 重启 / 删 Pod、Pod 日志流、容器 exec、server-side apply
 - [x] Phase 3a：API Token 鉴权（库内令牌 + 静态令牌，CLI 管理）、Service / Ingress / Events 视图、Deployment 暴露、通用资源接口（任意 GVR + CRD，YAML 查看）
-- [ ] Phase 3b：Web UI（React，随二进制内嵌）、Helm 应用市场、`panel/v1` 公开 API 定稿（OpenAPI）、多面板对接
+- [x] Phase 3b：Web UI（React + Ant Design，随二进制内嵌）：节点 / 终端、建集群向导、成员管理、工作负载（Pod 日志 / exec / 扩缩 / 暴露）、网络、事件、YAML apply、任意资源浏览、任务日志、令牌管理
+- [ ] Phase 4：Helm 应用市场、`panel/v1` 公开 API 定稿（OpenAPI）、多面板对接、指标（metrics-server 图表）
 
 ## 开发
 
 ```bash
-make build        # dist/starport-panel, dist/starport-agent
+make build        # ui + dist/starport-panel（内嵌 UI）+ dist/starport-agent
+make ui           # 只构建 Web UI → internal/panel/ui/dist
+make ui-dev       # UI 开发服务器 :5173，/api 代理到 :8080 的面板
 make agent-linux  # amd64 / arm64 静态 agent
 make proto        # 改了 .proto 后重新生成（需 buf + protoc-gen-go + protoc-gen-go-grpc）
 make test

@@ -18,9 +18,11 @@
 *.part-*
 *.parts.json
 
-# 前端（后续阶段）
+# 前端：源码在 web/，构建产物输出到 internal/panel/ui/dist（只保留 .gitkeep 占位）
 /web/node_modules/
 /web/dist/
+/internal/panel/ui/dist/*
+!/internal/panel/ui/dist/.gitkeep
 
 # IDE / 本地
 .idea/

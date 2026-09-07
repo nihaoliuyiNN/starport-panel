@@ -14,13 +14,13 @@ import (
 //   - 查询参数 `?token=<token>`（浏览器 WebSocket 无法自定义 Header，仅为此保留）
 //
 // 令牌校验：先比静态 Config.APIToken，再查库（api_tokens，未吊销）。
-// 放行：/healthz、agent 引导注册（自有 bootstrap token）。
+// 只保护 /api/**；静态 UI 资源、/healthz 与 agent 引导注册（自有 bootstrap token）放行。
 func (s *Server) auth(next http.Handler) http.Handler {
 	if s.cfg.InsecureNoAuth {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || (r.Method == http.MethodPost && r.URL.Path == agenthub.RegisterPath) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") || (r.Method == http.MethodPost && r.URL.Path == agenthub.RegisterPath) {
 			next.ServeHTTP(w, r)
 			return
 		}

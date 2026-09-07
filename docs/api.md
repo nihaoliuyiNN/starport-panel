@@ -6,7 +6,7 @@ apiserver 返回的状态错误按其原 HTTP 码透传，code 为 `K8S_<Reason>
 
 ## 鉴权
 
-除 `GET /healthz` 与 agent 引导注册（`POST /agents/register`，自有 bootstrap token）外，所有请求须带 API 令牌：
+鉴权只覆盖 `/api/**`：除 agent 引导注册（`POST /api/v1/agents/register`，自有 bootstrap token）外，所有 API 请求须带令牌；`/healthz` 与 Web UI 静态资源（根路径及非 `/api` 路径，SPA 回退到 `index.html`）不鉴权。未匹配的 `/api/**` 路径返回 JSON 404 而不是页面。
 
 - `Authorization: Bearer <token>`（首选）
 - `?token=<token>`（仅供浏览器 WebSocket，无法自定义 Header 时使用）

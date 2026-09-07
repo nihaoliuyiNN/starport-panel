@@ -6,17 +6,22 @@ starport-panel 仓库有三类产物：
 2. **starport-agent 二进制**（`cmd/starport-agent`）— 装到每台节点，呼出连面板。
 3. **K8s 离线包** `k8s-bundle.tar.gz`（`scripts/build-k8s-bundle.sh`）— agent 内置装机用（在线模式不需要）。
 
-前置：Go 1.25+（`go.mod` 模块名 `starport-panel`）。命令均在仓库根目录执行；有 `make` 的环境直接用 `Makefile`。
+前置：Go 1.25+（`go.mod` 模块名 `starport-panel`）；构建 Web UI 另需 Node ≥ 20 + pnpm。命令均在仓库根目录执行；有 `make` 的环境直接用 `Makefile`。
 
 ---
 
 ## 1. 面板 starport-panel
 
 ```bash
+make ui                                      # web/ → internal/panel/ui/dist（内嵌进二进制；不执行则面板只有 API，根路径返回 503 提示）
 make panel                                   # dist/starport-panel
 ./dist/starport-panel serve --bootstrap-token <随机长字符串>
 ./dist/starport-panel token create --name admin   # 签发 API 令牌（明文只打印一次；面板运行中亦可执行）
 ```
+
+浏览器打开 `http://<面板>:8080`，用签发的令牌登录（令牌存浏览器 localStorage，`退出` 清除）。Web UI 只调用 [api.md](api.md) 里的公开接口，没有任何私有端点。
+
+UI 开发：`make ui-dev` 起 Vite 开发服务器（:5173），`/api` 代理到本机 :8080 的面板（含 WebSocket）。
 
 参数（亦可用环境变量）：
 

@@ -15,6 +15,7 @@ import (
 	"starport-panel/internal/panel/cluster"
 	"starport-panel/internal/panel/store"
 	"starport-panel/internal/panel/task"
+	"starport-panel/internal/panel/ui"
 )
 
 // routes 面板 HTTP API（/api/v1）。响应一律 JSON；错误形如 {"error":{"code","message"}}。
@@ -76,6 +77,13 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/tasks/{id}", s.getTask)
 	mux.HandleFunc("GET /api/v1/tasks/{id}/logs", s.taskLogs)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", s.cancelTask)
+
+	// 未匹配的 /api 路径统一 404 JSON，不落到前端页面
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
+		writeErr(w, &cluster.Error{Code: "NOT_FOUND", Message: "接口不存在", Status: 404})
+	})
+	// Web UI（内嵌静态资源 + SPA 回退）
+	mux.Handle("/", ui.Handler())
 	return mux
 }
 

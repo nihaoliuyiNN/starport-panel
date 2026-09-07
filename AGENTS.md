@@ -20,7 +20,9 @@
 - `internal/panel/cluster` — 集群编排（建集群 / 加节点 / 接管凭据 / join 刷新 / 移除节点 / 删集群）。依赖 `cluster.Hub` 接口而非具体 hub，便于测试；删集群后经 `OnDeleted` 通知 kube 丢缓存。
 - `internal/panel/kube` — client-go 直连 apiserver：`kube.go` 客户端缓存（按 kubeconfig 哈希，clientset + dynamic + discovery），`workloads.go` 列表与扩缩 / 重启 / 删 Pod / 日志流，`exec.go` 容器 exec（WebSocket 优先回落 SPDY），`apply.go` server-side apply / delete。只有面板 import client-go，agent 二进制不受影响。
 - `internal/panel/terminal.go` / `api_kube.go` — WebSocket 桥接（节点 PTY、容器 exec）与 k8s 资源 HTTP 处理器。终端协议：二进制帧=字节流，文本帧=控制 JSON（`resize` / `exit`），两处一致，不要各造一套。
-- `internal/panel/auth.go` — API 令牌中间件（Bearer / `?token=`）。库内令牌 `store/tokens.go` 只存 sha256；静态令牌 `Config.APIToken`。单角色管理员模型，暂无细粒度权限——需要多租户 / RBAC 的是商业层的事，不要加进来。
+- `internal/panel/ui` — `go:embed all:dist` 内嵌 Web UI；`dist/` 是构建产物（只提交 `.gitkeep`），`make ui` 生成。未构建时根路径返回 503 提示，API 不受影响。
+- `web/` — UI 源码（React 18 + Vite + Ant Design 5 + TanStack Query + xterm.js，pnpm）。约定：`src/api/` 是唯一的 HTTP 层（`types.ts` 与 Go JSON 一一对应，改后端结构必须同步）；页面用 antd 原生 `Table`，不引 pro-components；所有表格 `scroll={{ x: 'max-content' }}`；WebSocket 经 `wsUrl()` 带 `?token=`。UI 只消费公开 API，不得出现任何 UI 专用后端接口。
+- `internal/panel/auth.go` — API 令牌中间件（Bearer / `?token=`），只保护 `/api/**`，静态资源放行。库内令牌 `store/tokens.go` 只存 sha256；静态令牌 `Config.APIToken`。单角色管理员模型，暂无细粒度权限——需要多租户 / RBAC 的是商业层的事，不要加进来。
 - `kube/network.go`（Service / Ingress / Events / expose）、`kube/resources.go`（任意 GVR 的通用 list / get YAML / delete，供 UI 兜底）。新增"精简视图"只在高频资源上做；长尾资源一律走通用接口，不要为每种 Kind 再写一套结构体。
 - `internal/agent` — agent 运行时（`conn.go` 流、`exec.go` 串行执行、`stream.go` PTY 会话、`state.go` 身份）。
 - `internal/installer` — 装机引擎。**只依赖标准库与系统命令**，不 import 本仓库其它包（agent 以类型别名复用其类型）。
@@ -46,7 +48,7 @@
 
 ## 常用命令
 
-- 构建：`make build`；agent 静态交叉编译：`make agent-linux`。
+- 构建：`make build`（含 UI）；只构建 UI：`make ui`；UI 开发：`make ui-dev`（:5173 代理 /api → :8080）；agent 静态交叉编译：`make agent-linux`。
 - 协议：`make proto`（需 `buf`、`protoc-gen-go`、`protoc-gen-go-grpc` 在 PATH）。
 - 本地联调：`go run ./cmd/starport-panel serve --bootstrap-token dev` + `go run ./cmd/starport-agent --server http://127.0.0.1:8080 --token dev --data-dir /tmp/sp`。
 - 离线装机包：`scripts/build-k8s-bundle.sh`（产物不入库）。
