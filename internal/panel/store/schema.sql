@@ -69,6 +69,16 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_node ON tasks(node_id, id);
 
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT    NOT NULL,
+    prefix       TEXT    NOT NULL,                -- 明文前 12 字符，用于人眼识别
+    hash         TEXT    NOT NULL UNIQUE,         -- sha256(明文) hex
+    created_at   TEXT    NOT NULL,
+    last_used_at TEXT    NOT NULL DEFAULT '',
+    revoked_at   TEXT    NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS task_logs (
     task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     seq     INTEGER NOT NULL,

@@ -8,7 +8,7 @@
 - **结构化装机**：面板下发的是结构化 `InstallSpec`，不是一坨脚本；预检 / 阶段 / 失败码都是数据，可重试、可断点。
 - **契约先行**：面板 ↔ agent 走 gRPC 双向流，`.proto` 是唯一事实来源。
 
-> 当前状态：**Phase 2 —— 集群生命周期 + 工作负载管理（API 层）**。Helm、Web UI 见下方路线图。
+> 当前状态：**Phase 3a —— API 层完整可用（鉴权、集群生命周期、工作负载、网络暴露、通用资源）**。Web UI、Helm 见下方路线图。
 
 ## 组成
 
@@ -21,7 +21,7 @@
 | `internal/panel/store` | SQLite 持久化：节点、集群、成员、任务与日志 |
 | `internal/panel/cluster` | 集群编排：首 master init → 接管 kubeconfig / join 凭据 → master/worker 加入 → 节点移除 / 删集群 |
 | `internal/panel/task` | 异步任务执行器：日志落库、取消、终态回调 |
-| `internal/panel/kube` | client-go 直连 apiserver：节点 / 命名空间 / Pod / Deployment 视图，扩缩、重启、删 Pod，日志流，容器 exec，server-side apply |
+| `internal/panel/kube` | client-go 直连 apiserver：节点 / 命名空间 / Pod / Deployment / Service / Ingress / 事件视图，扩缩、重启、暴露，日志流，容器 exec，server-side apply，任意 GVR 通用读写 |
 | `internal/agent` | agent 运行时：呼出长连、串行执行队列、幂等、PTY 会话 |
 | `internal/installer` | Kubernetes 装机引擎（自洽，只依赖标准库与系统命令） |
 | `internal/pb/agentv1` | 由 `proto/` 生成的 Go 代码（入库） |
@@ -32,35 +32,40 @@
 ## 快速开始（本地联调）
 
 ```bash
-# 1. 起面板
-go run ./cmd/starport-panel serve --bootstrap-token dev
+# 1. 起面板，签发一个 API 令牌（本机开发也可 --insecure-no-auth 跳过鉴权）
+go run ./cmd/starport-panel serve --bootstrap-token dev --data-dir /tmp/sp-panel
+go run ./cmd/starport-panel token create --name dev --data-dir /tmp/sp-panel   # 打印 spt_...
+export H='Authorization: Bearer spt_...'
 
 # 2. 另一个终端起 agent（Linux 节点上跑真实装机；本机只验证链路）
 go run ./cmd/starport-agent --server http://127.0.0.1:8080 --token dev --data-dir /tmp/sp-agent
 
-# 3. 看节点、在节点上跑命令（异步任务，轮询日志）
-curl -s http://127.0.0.1:8080/api/v1/nodes
-curl -s -X POST http://127.0.0.1:8080/api/v1/nodes/1/exec -d '{"script":"uname -a"}'   # → {"taskId":1}
-curl -s http://127.0.0.1:8080/api/v1/tasks/1/logs
+# 3. 看节点、在节点上跑命令（异步任务，轮询日志）；下面所有 curl 都带 -H "$H"
+curl -s -H "$H" http://127.0.0.1:8080/api/v1/nodes
+curl -s -H "$H" -X POST http://127.0.0.1:8080/api/v1/nodes/1/exec -d '{"script":"uname -a"}'   # → {"taskId":1}
+curl -s -H "$H" http://127.0.0.1:8080/api/v1/tasks/1/logs
 
 # 4. 建集群：首 master 装机 → 控制面就绪 → 加 worker
-curl -s -X POST http://127.0.0.1:8080/api/v1/clusters -d '{"name":"prod","artifactMode":"online","cni":"calico","vip":"10.0.0.100"}'
-curl -s -X POST http://127.0.0.1:8080/api/v1/clusters/1/nodes -d '{"nodeId":1,"role":"first-master"}'   # → taskId
-curl -s -X POST http://127.0.0.1:8080/api/v1/clusters/1/nodes -d '{"nodeId":2,"role":"worker"}'
-curl -s http://127.0.0.1:8080/api/v1/clusters/1/kubeconfig
-curl -s http://127.0.0.1:8080/api/v1/clusters/1/k8s/nodes
+curl -s -H "$H" -X POST http://127.0.0.1:8080/api/v1/clusters -d '{"name":"prod","artifactMode":"online","cni":"calico","vip":"10.0.0.100"}'
+curl -s -H "$H" -X POST http://127.0.0.1:8080/api/v1/clusters/1/nodes -d '{"nodeId":1,"role":"first-master"}'   # → taskId
+curl -s -H "$H" -X POST http://127.0.0.1:8080/api/v1/clusters/1/nodes -d '{"nodeId":2,"role":"worker"}'
+curl -s -H "$H" http://127.0.0.1:8080/api/v1/clusters/1/kubeconfig
+curl -s -H "$H" http://127.0.0.1:8080/api/v1/clusters/1/k8s/nodes
 
 # 5. 管工作负载：apply YAML、看 Pod、拉日志、扩缩；节点 / 容器 Web 终端走 WebSocket
-curl -s -X POST -H 'Content-Type: application/yaml' --data-binary @nginx.yaml http://127.0.0.1:8080/api/v1/clusters/1/k8s/apply
-curl -s 'http://127.0.0.1:8080/api/v1/clusters/1/k8s/pods?namespace=default'
-curl -s 'http://127.0.0.1:8080/api/v1/clusters/1/k8s/namespaces/default/pods/nginx-xxx/logs?tail=100'
-curl -s -X POST http://127.0.0.1:8080/api/v1/clusters/1/k8s/namespaces/default/deployments/nginx/scale -d '{"replicas":3}'
-#   ws://127.0.0.1:8080/api/v1/nodes/1/terminal        节点终端（xterm.js 直连）
-#   ws://127.0.0.1:8080/api/v1/clusters/1/k8s/namespaces/default/pods/nginx-xxx/exec   容器终端
+curl -s -H "$H" -X POST -H 'Content-Type: application/yaml' --data-binary @nginx.yaml http://127.0.0.1:8080/api/v1/clusters/1/k8s/apply
+curl -s -H "$H" 'http://127.0.0.1:8080/api/v1/clusters/1/k8s/pods?namespace=default'
+curl -s -H "$H" 'http://127.0.0.1:8080/api/v1/clusters/1/k8s/namespaces/default/pods/nginx-xxx/logs?tail=100'
+curl -s -H "$H" -X POST http://127.0.0.1:8080/api/v1/clusters/1/k8s/namespaces/default/deployments/nginx/scale -d '{"replicas":3}'
+curl -s -H "$H" -X POST http://127.0.0.1:8080/api/v1/clusters/1/k8s/namespaces/default/deployments/nginx/expose -d '{"type":"NodePort","port":80}'
+curl -s -H "$H" 'http://127.0.0.1:8080/api/v1/clusters/1/k8s/events?namespace=default&object=Pod/nginx-xxx'
+curl -s -H "$H" 'http://127.0.0.1:8080/api/v1/clusters/1/k8s/resources/core/v1/configmaps?namespace=kube-system'   # 任意 GVR
+#   ws://127.0.0.1:8080/api/v1/nodes/1/terminal?token=spt_...        节点终端（xterm.js 直连）
+#   ws://127.0.0.1:8080/api/v1/clusters/1/k8s/namespaces/default/pods/nginx-xxx/exec?token=spt_...   容器终端
 
 # 6. 收尾：移除节点 / 删集群
-curl -s -X DELETE http://127.0.0.1:8080/api/v1/clusters/1/nodes/2      # drain + delete node + kubeadm reset → taskId
-curl -s -X DELETE 'http://127.0.0.1:8080/api/v1/clusters/1?force=true'  # 全部在线节点 reset 后删记录
+curl -s -H "$H" -X DELETE http://127.0.0.1:8080/api/v1/clusters/1/nodes/2      # drain + delete node + kubeadm reset → taskId
+curl -s -H "$H" -X DELETE 'http://127.0.0.1:8080/api/v1/clusters/1?force=true'  # 全部在线节点 reset 后删记录
 ```
 
 生产节点安装：`scripts/install-starport-agent.sh`（systemd 常驻，见 `docs/build.md`）。完整 API 见 [docs/api.md](docs/api.md)。
@@ -90,7 +95,8 @@ agent 只做出站连接；面板沿同一条流反向下发 `exec` / `install` 
 - [x] Phase 0：仓库骨架、agent ↔ 面板 gRPC 链路、节点注册/在线/exec
 - [x] Phase 1：SQLite 持久化、装集群编排（首 master → join，join 凭据自动刷新）、kubeconfig 接管、client-go 节点视图、异步任务与日志
 - [x] Phase 2：节点移除 / 删集群、节点 Web 终端、工作负载视图（命名空间 / Pod / Deployment）、扩缩 / 重启 / 删 Pod、Pod 日志流、容器 exec、server-side apply
-- [ ] Phase 3：Web UI（React）、Helm 应用市场、Service / Ingress 暴露、`panel/v1` 公开 API 定稿（REST/OpenAPI）、API Token、多面板对接
+- [x] Phase 3a：API Token 鉴权（库内令牌 + 静态令牌，CLI 管理）、Service / Ingress / Events 视图、Deployment 暴露、通用资源接口（任意 GVR + CRD，YAML 查看）
+- [ ] Phase 3b：Web UI（React，随二进制内嵌）、Helm 应用市场、`panel/v1` 公开 API 定稿（OpenAPI）、多面板对接
 
 ## 开发
 

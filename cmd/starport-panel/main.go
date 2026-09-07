@@ -4,9 +4,12 @@
 // 用法：
 //
 //	starport-panel serve --http :8080 --grpc :9192 --bootstrap-token <token>
+//	starport-panel token create --name ci      # 签发 API 令牌（明文只打印一次）
+//	starport-panel token list | revoke <id>
 //	starport-panel version
 //
 // 参数亦可用环境变量：STARPORT_HTTP_ADDR / STARPORT_GRPC_ADDR / STARPORT_BOOTSTRAP_TOKEN /
+// STARPORT_API_TOKEN（静态 API 令牌，可选）/ STARPORT_DATA_DIR /
 // STARPORT_GRPC_ENDPOINTS（逗号分隔，下发给 agent 的 gRPC 入口；空则按注册请求的主机推导）。
 package main
 
@@ -17,11 +20,15 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"starport-panel/internal/panel"
+	"starport-panel/internal/panel/store"
 )
 
 // version 编译期可用 -ldflags "-X main.version=x.y.z" 注入。
@@ -35,6 +42,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		serve(os.Args[2:])
+	case "token":
+		tokenCmd(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("starport-panel %s\n", version)
 	default:
@@ -51,6 +60,8 @@ func serve(args []string) {
 	fs.StringVar(&cfg.GrpcAddr, "grpc", env("STARPORT_GRPC_ADDR", ":9192"), "gRPC 监听地址（agent 呼出长连）")
 	fs.StringVar(&cfg.DataDir, "data-dir", env("STARPORT_DATA_DIR", defaultDataDir()), "状态目录（SQLite 数据库等）")
 	fs.StringVar(&cfg.BootstrapToken, "bootstrap-token", env("STARPORT_BOOTSTRAP_TOKEN", ""), "agent 引导注册令牌（必填）")
+	fs.StringVar(&cfg.APIToken, "api-token", env("STARPORT_API_TOKEN", ""), "静态 API 令牌（可选，与 `token create` 签发的令牌并行有效）")
+	fs.BoolVar(&cfg.InsecureNoAuth, "insecure-no-auth", false, "关闭 API 鉴权（仅本机开发）")
 	fs.StringVar(&endpoints, "grpc-endpoints", env("STARPORT_GRPC_ENDPOINTS", ""), "下发给 agent 的 gRPC 入口（逗号分隔 host:port）；空则按注册请求的主机推导")
 	_ = fs.Parse(args)
 
@@ -78,8 +89,83 @@ func serve(args []string) {
 	log.Printf("starport-panel 已停止")
 }
 
+// tokenCmd 直接操作面板数据库签发 / 列出 / 吊销 API 令牌（面板运行中亦可，SQLite WAL 允许并发读写）。
+func tokenCmd(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "用法: starport-panel token <create --name <名称>|list|revoke <id>> [--data-dir DIR]")
+		os.Exit(2)
+	}
+	sub, rest := args[0], args[1:]
+	fs := flag.NewFlagSet("token "+sub, flag.ExitOnError)
+	dataDir := fs.String("data-dir", env("STARPORT_DATA_DIR", defaultDataDir()), "状态目录（与 serve 一致）")
+	name := fs.String("name", "", "令牌名称（create 必填，如 ci / admin-ui）")
+	// 允许位置参数放在 flag 之前（revoke <id> --data-dir x）
+	var positional []string
+	for len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		positional, rest = append(positional, rest[0]), rest[1:]
+	}
+	_ = fs.Parse(rest)
+	positional = append(positional, fs.Args()...)
+
+	st, err := store.Open(filepath.Join(*dataDir, "panel.db"))
+	if err != nil {
+		log.Fatalf("打开数据库失败: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	switch sub {
+	case "create":
+		if *name == "" {
+			log.Fatal("缺少 --name")
+		}
+		t, plain, err := st.CreateToken(ctx, *name)
+		if err != nil {
+			log.Fatalf("签发失败: %v", err)
+		}
+		fmt.Printf("已签发令牌 #%d（%s）。明文只显示这一次，请妥善保存：\n\n  %s\n\n", t.ID, t.Name, plain)
+		fmt.Printf("用法: curl -H 'Authorization: Bearer %s' http://<panel>/api/v1/nodes\n", plain)
+	case "list":
+		ts, err := st.ListTokens(ctx)
+		if err != nil {
+			log.Fatalf("读取失败: %v", err)
+		}
+		fmt.Printf("%-5s %-20s %-14s %-20s %-20s %s\n", "ID", "NAME", "PREFIX", "CREATED", "LAST USED", "STATUS")
+		for _, t := range ts {
+			status := "active"
+			if t.Revoked() {
+				status = "revoked " + t.RevokedAt.Local().Format("2006-01-02 15:04")
+			}
+			fmt.Printf("%-5d %-20s %-14s %-20s %-20s %s\n", t.ID, t.Name, t.Prefix+"…",
+				t.CreatedAt.Local().Format("2006-01-02 15:04:05"), fmtTime(t.LastUsedAt), status)
+		}
+	case "revoke":
+		if len(positional) < 1 {
+			log.Fatal("用法: starport-panel token revoke <id>")
+		}
+		id, err := strconv.ParseUint(positional[0], 10, 64)
+		if err != nil {
+			log.Fatalf("非法 id: %s", positional[0])
+		}
+		if err := st.RevokeToken(ctx, id); err != nil {
+			log.Fatalf("吊销失败: %v", err)
+		}
+		fmt.Printf("令牌 #%d 已吊销\n", id)
+	default:
+		fmt.Fprintf(os.Stderr, "未知子命令 token %s\n", sub)
+		os.Exit(2)
+	}
+}
+
+func fmtTime(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.Local().Format("2006-01-02 15:04:05")
+}
+
 func usage() {
-	fmt.Fprintln(os.Stderr, "用法: starport-panel <serve|version> [flags]")
+	fmt.Fprintln(os.Stderr, "用法: starport-panel <serve|token|version> [flags]")
 }
 
 // defaultDataDir Linux 服务器用 /var/lib；其它平台（开发机）用当前目录下的 data/。

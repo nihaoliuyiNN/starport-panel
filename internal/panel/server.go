@@ -29,6 +29,10 @@ type Config struct {
 	BootstrapToken string
 	GrpcEndpoints  []string // 下发给 agent 的入口；空则按注册请求 Host 推导
 	Version        string
+	// APIToken 静态 API 令牌（可选）：适合自动化 / 上层系统按配置注入；与库内令牌并行有效。
+	APIToken string
+	// InsecureNoAuth 关闭 API 鉴权（仅本机开发）。
+	InsecureNoAuth bool
 }
 
 // Server 面板进程。
@@ -77,7 +81,12 @@ func New(cfg Config) (*Server, error) {
 	s.clusters.OnDeleted(s.kube.Forget)
 
 	// WebSocket 长连接（终端 / 日志 / exec）不能有写超时；HTTP 服务器只限制请求头读取
-	s.http = &http.Server{Addr: cfg.HTTPAddr, Handler: s.routes(), ReadHeaderTimeout: 10 * time.Second}
+	if cfg.InsecureNoAuth {
+		log.Printf("[panel] 警告：API 鉴权已关闭（--insecure-no-auth），仅限本机开发")
+	} else if n, _ := st.CountActiveTokens(context.Background()); n == 0 && cfg.APIToken == "" {
+		log.Printf("[panel] 尚无 API 令牌：除 agent 注册外所有 API 将拒绝访问；请执行 `starport-panel token create --name <名称>`")
+	}
+	s.http = &http.Server{Addr: cfg.HTTPAddr, Handler: s.auth(s.routes()), ReadHeaderTimeout: 10 * time.Second}
 	s.grpc = grpc.NewServer(agenthub.ServerOptions()...)
 	pb.RegisterNodeAgentServiceServer(s.grpc, hub)
 	return s, nil

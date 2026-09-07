@@ -4,7 +4,25 @@
 apiserver 返回的状态错误按其原 HTTP 码透传，code 为 `K8S_<Reason>`（如 `K8S_NOTFOUND`、`K8S_FORBIDDEN`、`K8S_INVALID`）。
 调用方按 `error.code` 分支，不解析 message。
 
-> Phase 2 尚无鉴权；面板请只监听内网或置于反向代理之后。API Token 在 Phase 3 进入。
+## 鉴权
+
+除 `GET /healthz` 与 agent 引导注册（`POST /agents/register`，自有 bootstrap token）外，所有请求须带 API 令牌：
+
+- `Authorization: Bearer <token>`（首选）
+- `?token=<token>`（仅供浏览器 WebSocket，无法自定义 Header 时使用）
+
+缺失 → `401 UNAUTHENTICATED`。令牌来源两种，并行有效：
+
+1. 库内令牌：`starport-panel token create --name ci`（面板运行中亦可执行）；明文 `spt_…` 只打印一次，库里只存 sha256。`token list` / `token revoke <id>` 管理。
+2. 静态令牌：`serve --api-token <secret>`（或 `STARPORT_API_TOKEN`），适合自动化 / 上层系统按配置注入。
+
+面板是单角色管理员模型：任一有效令牌拥有全部权限，包括管理令牌本身。本机开发可 `serve --insecure-no-auth` 关闭鉴权。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/tokens` | 全部令牌（含已吊销）：`id`、`name`、`prefix`、`createdAt`、`lastUsedAt`、`revokedAt` |
+| `POST` | `/tokens` | 体 `{"name":"ci"}` → `201 {"token":{...},"plain":"spt_..."}`，`plain` 仅此一次 |
+| `DELETE` | `/tokens/{id}` | 吊销（立即失效，幂等）→ `204` |
 
 ## 节点
 
@@ -46,11 +64,27 @@ apiserver 返回的状态错误按其原 HTTP 码透传，code 为 `K8S_<Reason>
 | `GET` | `/deployments?namespace=` | Deployment：`replicas`、`ready`、`updated`、`available`、`images[]`、`labels` |
 | `POST` | `/namespaces/{ns}/deployments/{name}/scale` | 体 `{"replicas":3}` → `204` |
 | `POST` | `/namespaces/{ns}/deployments/{name}/restart` | 滚动重启（同 `kubectl rollout restart`）→ `204` |
+| `POST` | `/namespaces/{ns}/deployments/{name}/expose` | 为 Deployment 建 Service（同名已存在则更新）。体 `{"name":"","type":"ClusterIP|NodePort|LoadBalancer","port":80,"targetPort":8080,"nodePort":0,"protocol":"TCP"}` → `201` Service |
+| `GET` | `/services?namespace=` | Service：`type`、`clusterIp`、`externalIps[]`（含 LB 回填）、`ports[]{port,targetPort,nodePort,protocol}`、`selector` |
+| `DELETE` | `/namespaces/{ns}/services/{name}` | 删 Service → `204` |
+| `GET` | `/ingresses?namespace=` | Ingress：`class`、`rules[]{host,path,service,port}`、`tlsHosts[]`、`addresses[]` |
+| `GET` | `/events?namespace=&object=Pod/nginx-abc` | 事件（最近发生倒序）：`type`、`reason`、`message`、`object`、`count`、`firstSeen`、`lastSeen`；`object` 形如 `Kind/name` 只看该对象 |
 | `POST` | `/apply?namespace=default` | server-side apply 多文档 YAML（`kubectl apply --server-side --force-conflicts`）→ `{"applied":[{kind,namespace,name}]}` |
 | `POST` | `/delete?namespace=default` | 按 YAML 删对象（`kubectl delete -f`，不存在忽略）→ `{"deleted":[...]}` |
 
 `apply` / `delete` 正文两种给法：`Content-Type: application/yaml` 直接放 YAML；或 JSON `{"manifest":"...","namespace":"default"}`。
 无 `metadata.namespace` 的 namespaced 资源落到 `namespace` 参数（默认 `default`）。任一文档失败即停止，响应同时带已成功的 `applied` 与 `error`，已成功的不回滚。
+
+### 通用资源（任意 GVR，含 CRD）
+
+精简视图覆盖不到的资源走通用接口。路径 `{group}/{version}/{resource}`，核心组用 `core`（如 `core/v1/configmaps`、`apps/v1/statefulsets`、`cert-manager.io/v1/certificates`）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/resource-kinds` | 集群支持的全部可 list 资源类型：`group`、`version`、`resource`、`kind`、`namespaced`、`verbs[]` |
+| `GET` | `/resources/{group}/{version}/{resource}?namespace=&labelSelector=` | 列表（只带元数据）：`namespace`、`name`、`labels`、`createdAt` |
+| `GET` | `/resources/{group}/{version}/{resource}/{name}?namespace=` | 单对象完整 YAML（`application/yaml`，去掉 `managedFields`）；集群级资源省略 `namespace` |
+| `DELETE` | `/resources/{group}/{version}/{resource}/{name}?namespace=` | 删对象 → `204` |
 
 ## 终端协议（WebSocket）
 
@@ -110,6 +144,7 @@ apiserver 返回的状态错误按其原 HTTP 码透传，code 为 `K8S_<Reason>
 
 | code | 含义 |
 |---|---|
+| `UNAUTHENTICATED` | 缺少 / 无效 / 已吊销的 API 令牌 |
 | `INVALID_ARGUMENT` | 参数不合法（message 说明哪个） |
 | `NOT_FOUND` | 节点 / 集群 / 任务不存在 |
 | `NODE_OFFLINE` | 节点 agent 未连接 |

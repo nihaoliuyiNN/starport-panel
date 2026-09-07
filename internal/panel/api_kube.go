@@ -13,6 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/remotecommand"
 	utilexec "k8s.io/client-go/util/exec"
 
@@ -140,6 +141,156 @@ func (s *Server) k8sRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.kube.RestartDeployment(r.Context(), id, kc, r.PathValue("ns"), r.PathValue("name")); err != nil {
+		writeErr(w, kubeErr(err))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// k8sExpose 为 Deployment 建 Service。体 {"name","type","port","targetPort","nodePort","protocol"}。
+func (s *Server) k8sExpose(w http.ResponseWriter, r *http.Request) {
+	id, kc, ok := s.kubeconfigFor(w, r)
+	if !ok {
+		return
+	}
+	var req kube.ExposeRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.Port <= 0 || req.Port > 65535 {
+		writeErr(w, &cluster.Error{Code: "INVALID_ARGUMENT", Message: "port 必填（1-65535）", Status: 400})
+		return
+	}
+	switch req.Type {
+	case "", "ClusterIP", "NodePort", "LoadBalancer":
+	default:
+		writeErr(w, &cluster.Error{Code: "INVALID_ARGUMENT", Message: "type 须为 ClusterIP | NodePort | LoadBalancer", Status: 400})
+		return
+	}
+	svc, err := s.kube.ExposeDeployment(r.Context(), id, kc, r.PathValue("ns"), r.PathValue("name"), req)
+	if err != nil {
+		writeErr(w, kubeErr(err))
+		return
+	}
+	writeJSON(w, http.StatusCreated, svc)
+}
+
+func (s *Server) k8sServices(w http.ResponseWriter, r *http.Request) {
+	id, kc, ok := s.kubeconfigFor(w, r)
+	if !ok {
+		return
+	}
+	out, err := s.kube.Services(r.Context(), id, kc, r.URL.Query().Get("namespace"))
+	if err != nil {
+		writeErr(w, kubeErr(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) k8sDeleteService(w http.ResponseWriter, r *http.Request) {
+	id, kc, ok := s.kubeconfigFor(w, r)
+	if !ok {
+		return
+	}
+	if err := s.kube.DeleteService(r.Context(), id, kc, r.PathValue("ns"), r.PathValue("name")); err != nil {
+		writeErr(w, kubeErr(err))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) k8sIngresses(w http.ResponseWriter, r *http.Request) {
+	id, kc, ok := s.kubeconfigFor(w, r)
+	if !ok {
+		return
+	}
+	out, err := s.kube.Ingresses(r.Context(), id, kc, r.URL.Query().Get("namespace"))
+	if err != nil {
+		writeErr(w, kubeErr(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// k8sEvents ?namespace= ?object=Pod/nginx-abc
+func (s *Server) k8sEvents(w http.ResponseWriter, r *http.Request) {
+	id, kc, ok := s.kubeconfigFor(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	out, err := s.kube.Events(r.Context(), id, kc, q.Get("namespace"), q.Get("object"))
+	if err != nil {
+		writeErr(w, kubeErr(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// ── 通用资源 ─────────────────────────────────────────────────────────────────
+
+func (s *Server) k8sResourceKinds(w http.ResponseWriter, r *http.Request) {
+	id, kc, ok := s.kubeconfigFor(w, r)
+	if !ok {
+		return
+	}
+	out, err := s.kube.ResourceKinds(r.Context(), id, kc)
+	if err != nil {
+		writeErr(w, kubeErr(err))
+		return
+	}
+	if out == nil {
+		out = []kube.ResourceKind{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// pathGVR 解析 {group}/{version}/{resource}；group 为 "core" 表示核心组。
+func pathGVR(r *http.Request) schema.GroupVersionResource {
+	g := r.PathValue("group")
+	if g == "core" {
+		g = ""
+	}
+	return schema.GroupVersionResource{Group: g, Version: r.PathValue("version"), Resource: r.PathValue("resource")}
+}
+
+// k8sListResources ?namespace= ?labelSelector=
+func (s *Server) k8sListResources(w http.ResponseWriter, r *http.Request) {
+	id, kc, ok := s.kubeconfigFor(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	out, err := s.kube.ListResources(r.Context(), id, kc, pathGVR(r), q.Get("namespace"), q.Get("labelSelector"))
+	if err != nil {
+		writeErr(w, kubeErr(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// k8sGetResource ?namespace=（集群级资源省略）→ application/yaml
+func (s *Server) k8sGetResource(w http.ResponseWriter, r *http.Request) {
+	id, kc, ok := s.kubeconfigFor(w, r)
+	if !ok {
+		return
+	}
+	y, err := s.kube.GetResource(r.Context(), id, kc, pathGVR(r), r.URL.Query().Get("namespace"), r.PathValue("name"))
+	if err != nil {
+		writeErr(w, kubeErr(err))
+		return
+	}
+	w.Header().Set("Content-Type", "application/yaml")
+	_, _ = w.Write(y)
+}
+
+func (s *Server) k8sDeleteResource(w http.ResponseWriter, r *http.Request) {
+	id, kc, ok := s.kubeconfigFor(w, r)
+	if !ok {
+		return
+	}
+	if err := s.kube.DeleteResource(r.Context(), id, kc, pathGVR(r), r.URL.Query().Get("namespace"), r.PathValue("name")); err != nil {
 		writeErr(w, kubeErr(err))
 		return
 	}

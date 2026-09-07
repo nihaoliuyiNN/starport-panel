@@ -53,8 +53,23 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/deployments", s.k8sDeployments)
 	mux.HandleFunc("POST /api/v1/clusters/{id}/k8s/namespaces/{ns}/deployments/{name}/scale", s.k8sScale)
 	mux.HandleFunc("POST /api/v1/clusters/{id}/k8s/namespaces/{ns}/deployments/{name}/restart", s.k8sRestart)
+	mux.HandleFunc("POST /api/v1/clusters/{id}/k8s/namespaces/{ns}/deployments/{name}/expose", s.k8sExpose)
+	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/services", s.k8sServices)
+	mux.HandleFunc("DELETE /api/v1/clusters/{id}/k8s/namespaces/{ns}/services/{name}", s.k8sDeleteService)
+	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/ingresses", s.k8sIngresses)
+	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/events", s.k8sEvents)
 	mux.HandleFunc("POST /api/v1/clusters/{id}/k8s/apply", s.k8sApply)
 	mux.HandleFunc("POST /api/v1/clusters/{id}/k8s/delete", s.k8sDeleteManifest)
+	// 通用资源：任意 GVR（含 CRD）。core 组用 "core"（如 /resources/core/v1/configmaps）
+	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/resource-kinds", s.k8sResourceKinds)
+	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/resources/{group}/{version}/{resource}", s.k8sListResources)
+	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/resources/{group}/{version}/{resource}/{name}", s.k8sGetResource)
+	mux.HandleFunc("DELETE /api/v1/clusters/{id}/k8s/resources/{group}/{version}/{resource}/{name}", s.k8sDeleteResource)
+
+	// API 令牌（持有任一有效令牌即可管理；面板是单角色管理员模型）
+	mux.HandleFunc("GET /api/v1/tokens", s.listTokens)
+	mux.HandleFunc("POST /api/v1/tokens", s.createToken)
+	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.revokeToken)
 
 	// 任务
 	mux.HandleFunc("GET /api/v1/tasks", s.listTasks)
@@ -248,6 +263,52 @@ func (s *Server) clusterKubeconfig(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/yaml")
 	_, _ = io.WriteString(w, kc)
+}
+
+// ── API 令牌 ─────────────────────────────────────────────────────────────────
+
+func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {
+	ts, err := s.store.ListTokens(r.Context())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if ts == nil {
+		ts = []store.APIToken{}
+	}
+	writeJSON(w, http.StatusOK, ts)
+}
+
+// createToken 明文只在这次响应里出现。
+func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		writeErr(w, &cluster.Error{Code: "INVALID_ARGUMENT", Message: "name 必填", Status: 400})
+		return
+	}
+	t, plain, err := s.store.CreateToken(r.Context(), req.Name)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"token": t, "plain": plain})
+}
+
+func (s *Server) revokeToken(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	if err := s.store.RevokeToken(r.Context(), id); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ── 任务 ─────────────────────────────────────────────────────────────────────
