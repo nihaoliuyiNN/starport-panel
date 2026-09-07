@@ -1,0 +1,5 @@
+# 统一 LF：shell 脚本经 curl | bash 直接执行，CRLF 会报 $'\r': command not found
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.png binary
+*.tar.gz binary

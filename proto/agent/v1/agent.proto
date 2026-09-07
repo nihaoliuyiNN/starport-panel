@@ -1,0 +1,240 @@
+// starport-agent（节点侧）↔ starport-panel（控制面）契约，唯一事实来源。
+//
+// 拓扑（Nacos 2.x 风格）：agent 主动呼出、单条 gRPC 双向流长连；面板沿同一条流反向下发指令。
+// 节点上不监听端口、不保管 SSH 凭证，天然穿 NAT。
+//
+//   1. 引导注册走 HTTP：POST {panel}/api/v1/agents/register（凭引导令牌），
+//      应答里下发 nodeId / agentToken / grpcEndpoints；agent 据此连 gRPC 端口。
+//   2. 长连：NodeAgentService.Connect 双向流。metadata 携带
+//        x-starport-agent-token / x-starport-node-id / x-starport-agent-version
+//      令牌无效返回 UNAUTHENTICATED，agent 清本地身份重新注册。
+//
+// 生成物：internal/pb/agentv1（`make proto` / `buf generate`，产物入库）。
+syntax = "proto3";
+
+package agent.v1;
+
+option go_package = "starport-panel/internal/pb/agentv1;agentv1";
+
+// ───────────────────────────── 服务 ─────────────────────────────
+
+service NodeAgentService {
+  // 呼出长连：agent 发起，双向复用。首帧必须是 Ready。
+  rpc Connect(stream AgentFrame) returns (stream ServerFrame);
+}
+
+// ───────────────────────────── 帧 ─────────────────────────────
+
+// 控制面 → agent。
+message ServerFrame {
+  // 关联 ID：exec/install/cancel 与 session_* 用；ping 留空。
+  string request_id = 1;
+  oneof body {
+    ExecRequest exec = 10;
+    InstallRequest install = 11;
+    CancelRequest cancel = 12;
+    Ping ping = 13;
+
+    SessionOpen session_open = 20;
+    SessionStdin session_stdin = 21;
+    SessionResize session_resize = 22;
+    SessionClose session_close = 23;
+  }
+}
+
+// agent → 控制面。
+message AgentFrame {
+  string request_id = 1;
+  oneof body {
+    Ready ready = 10;
+    Heartbeat heartbeat = 11;
+    LogLine log = 12;
+    ExecResult result = 13;
+    Pong pong = 14;
+
+    SessionData session_data = 20;
+    SessionExit session_exit = 21;
+  }
+}
+
+// ───────────────────────────── 控制面 → agent ─────────────────────────────
+
+// 下发脚本，本机 shell 执行（串行队列）。
+message ExecRequest {
+  string script = 1;
+  // 到点强杀；<=0 用 agent 默认（30 分钟）。
+  int64 timeout_ms = 2;
+}
+
+// 下发内置 K8s 装机（结构化，非脚本）。无外部超时，仅支持 cancel。
+message InstallRequest {
+  InstallSpec spec = 1;
+}
+
+// 取消 request_id 对应的 exec / install（杀整进程组）。
+message CancelRequest {}
+
+// 应用层探活。
+message Ping {}
+
+// 开一条流式/交互会话（网页终端、kubectl logs -f）。与 exec 不共用执行通道。
+message SessionOpen {
+  string script = 1;
+  bool tty = 2;
+  int32 cols = 3;
+  int32 rows = 4;
+}
+
+message SessionStdin {
+  bytes payload = 1;
+}
+
+message SessionResize {
+  int32 cols = 1;
+  int32 rows = 2;
+}
+
+message SessionClose {}
+
+// ───────────────────────────── agent → 控制面 ─────────────────────────────
+
+// 连接建立后首帧：身份 + 现状。
+message Ready {
+  uint64 node_id = 1;
+  string agent_version = 2;
+  Facts facts = 3;
+}
+
+// 周期心跳（节奏由注册应答下发）。
+message Heartbeat {
+  uint64 node_id = 1;
+  Facts facts = 2;
+}
+
+// exec / install 的输出行（stdout/stderr 合并，逐行）。
+message LogLine {
+  string line = 1;
+}
+
+// exec / install 终态。
+message ExecResult {
+  bool ok = 1;
+  int32 exit_code = 2;
+  Error error = 3;
+  // 仅 install 成功时携带。
+  InstallResult install = 4;
+}
+
+message Pong {}
+
+// 会话输出（原始字节，不保证是合法 UTF-8）。
+message SessionData {
+  bytes payload = 1;
+}
+
+// 会话结束。
+message SessionExit {
+  int32 exit_code = 1;
+  Error error = 2;
+}
+
+// ───────────────────────────── 公共类型 ─────────────────────────────
+
+// 结构化错误：控制面按 code 分支/重试，不解析字符串。
+// 执行类：EXEC_TIMEOUT / EXEC_FAILED / CANCELLED / SCRIPT_WRITE_FAILED
+// 装机类：INSTALL_PREFLIGHT_FAILED / INSTALL_STEP_FAILED / INSTALL_UNSUPPORTED_OS
+message Error {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
+
+// 主机现状：注册（HTTP JSON，字段名同 json_name）、ready、心跳。
+message Facts {
+  string hostname = 1;
+  string internal_ip = 2;
+  string os = 3;
+  string arch = 4;
+  string kernel = 5;
+  int32 cpu_cores = 6;
+  uint64 mem_bytes = 7;
+  double cpu_used_percent = 8;
+  double mem_used_percent = 9;
+}
+
+// ───────────────────────────── 装机 ─────────────────────────────
+
+// 节点角色。
+enum NodeRole {
+  NODE_ROLE_UNSPECIFIED = 0;
+  NODE_ROLE_FIRST_MASTER = 1; // kubeadm init --upload-certs
+  NODE_ROLE_JOIN_MASTER = 2;  // join --control-plane --certificate-key
+  NODE_ROLE_WORKER = 3;       // join
+}
+
+// CNI 类型。
+enum CniType {
+  CNI_TYPE_UNSPECIFIED = 0;
+  CNI_TYPE_CILIUM = 1;
+  CNI_TYPE_CALICO = 2;
+}
+
+// 制品来源。
+enum ArtifactMode {
+  ARTIFACT_MODE_UNSPECIFIED = 0;
+  ARTIFACT_MODE_BUNDLE = 1; // 离线包：节点无需外网
+  ARTIFACT_MODE_ONLINE = 2; // 在线：apt + 镜像仓，仅 calico
+}
+
+// 控制面下发的结构化装机指令。agent 按 role 编排本机装机阶段。
+message InstallSpec {
+  NodeRole role = 1;
+  string k8s_version = 2;            // 如 v1.35.7，空用 agent 默认
+  string pod_cidr = 3;               // 如 10.244.0.0/16
+  string service_cidr = 4;           // 如 10.96.0.0/12
+  string image_repository = 5;       // 镜像仓前缀，空用官方
+  string control_plane_endpoint = 6; // VIP:6443 或外部 LB
+  string advertise_address = 7;      // 本节点 apiserver 通告 IP
+  repeated string cert_sans = 8;
+  VipSpec vip = 9;                   // 内置 kube-vip
+  CniSpec cni = 10;                  // 首 master 装 CNI
+  JoinSpec join = 11;                // join-master / worker 用
+  ArtifactSpec artifact = 12;        // 制品来源
+  repeated string addons = 13;       // ingress-nginx / metrics-server / cert-manager
+}
+
+// kube-vip 静态 Pod 参数（L2/ARP）。
+message VipSpec {
+  bool enabled = 1;
+  string address = 2;   // VIP
+  string interface = 3; // 绑定网卡，空则自动探测
+  string version = 4;   // kube-vip 镜像 tag，空用内置默认
+}
+
+message CniSpec {
+  CniType type = 1;
+  string version = 2; // 如 1.16.5 / v3.29.1
+}
+
+// 加入集群所需凭据（由首 master 装机后回传）。
+message JoinSpec {
+  string token = 1;
+  string ca_cert_hash = 2;     // sha256:...
+  string certificate_key = 3;  // 仅 join-master 用（2h 有效）
+}
+
+message ArtifactSpec {
+  ArtifactMode mode = 1;
+  string bundle_url = 2;   // bundle：离线包地址（tar.gz 或 .parts.json 分卷清单）
+  bool use_cn_mirror = 3;  // online：国内镜像源
+}
+
+// 装机终态的结构化输出。首 master 回传 join 凭据与 kubeconfig。
+message InstallResult {
+  string join_command = 1;
+  string token = 2;
+  string ca_cert_hash = 3;
+  string certificate_key = 4;
+  string control_plane_endpoint = 5;
+  string kubeconfig_b64 = 6;
+}

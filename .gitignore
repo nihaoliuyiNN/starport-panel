@@ -1,0 +1,22 @@
+# 构建产物
+/bin/
+/dist/
+*.exe
+*.log
+*.err
+
+# 离线装机包（数百 MB，走 Release 附件 / 对象存储，不入库）
+/scripts/dist/
+*.tar.gz
+*.tar.gz.sha256
+*.part-*
+*.parts.json
+
+# 前端（后续阶段）
+/web/node_modules/
+/web/dist/
+
+# IDE / 本地
+.idea/
+.vscode/
+.DS_Store

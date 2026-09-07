@@ -1,0 +1,10 @@
+# 在 proto/ 目录执行 `buf generate`（或仓库根 `make proto`）。产物入库。
+# module=starport-panel：按 go_package 去掉模块前缀落盘 → internal/pb/agentv1/
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: ..
+    opt: module=starport-panel
+  - local: protoc-gen-go-grpc
+    out: ..
+    opt: module=starport-panel
