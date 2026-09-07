@@ -15,6 +15,10 @@ const q = (params: Record<string, string | number | undefined>) => {
   return str ? `?${str}` : '';
 };
 
+export const agentsApi = {
+  enroll: () => api.get<{ bootstrapToken: string; version: string }>('/agents/enroll'),
+};
+
 export const nodesApi = {
   list: () => api.get<Node[]>('/nodes'),
   get: (id: number) => api.get<Node>(`/nodes/${id}`),

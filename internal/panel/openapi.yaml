@@ -89,6 +89,21 @@ paths:
                   grpcTls: { type: boolean }
         "401": { $ref: "#/components/responses/Error" }
 
+  /agents/enroll:
+    get:
+      tags: [nodes]
+      summary: 纳管新节点所需材料
+      description: 返回 agent 引导令牌与面板版本，UI 据此拼出节点上执行的一行安装命令。引导令牌本就要交给每台新节点，持有 API 令牌的管理员可读取。
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bootstrapToken: { type: string }
+                  version: { type: string, description: 面板版本；发行版为 v* tag，dev 构建为 "dev" }
+
   # ── 节点 ─────────────────────────────────────────────────────────────────────
   /nodes:
     get:

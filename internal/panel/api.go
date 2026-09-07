@@ -28,8 +28,9 @@ func (s *Server) routes() http.Handler {
 	})
 	mux.HandleFunc("GET /api/v1/openapi.yaml", s.openapi)
 
-	// agent 引导注册
+	// agent 引导注册；enroll 给 UI 生成纳管命令（需 API 令牌）
 	mux.Handle("POST "+agenthub.RegisterPath, s.hub.RegisterHandler())
+	mux.HandleFunc("GET /api/v1/agents/enroll", s.agentEnroll)
 
 	// 节点
 	mux.HandleFunc("GET /api/v1/nodes", s.listNodes)

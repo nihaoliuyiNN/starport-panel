@@ -64,8 +64,11 @@ curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/latest/downlo
 # 可选：STARPORT_VERSION=v0.1.0 STARPORT_BOOTSTRAP_TOKEN= STARPORT_HTTP_ADDR=:8080 STARPORT_GRPC_ADDR=:9192
 #       STARPORT_GRPC_ENDPOINTS=panel.example.com:9192 STARPORT_TLS_CERT= STARPORT_TLS_KEY=
 #       STARPORT_PANEL_BIN_URL=<自己编的二进制直链>
+#       STARPORT_WITH_AGENT=1（本机同时装成节点，单机 / 面板机兼作 master）
 systemctl status starport-panel; journalctl -u starport-panel -f
 ```
+
+装完后纳管其它节点不用手拼命令：Web UI「节点 → 纳管节点」给出已填好面板地址、引导令牌、版本的一行命令（背后是 `GET /api/v1/agents/enroll`）。
 
 二进制默认从同一个 Release 取 `starport-panel-linux-amd64`（面板目前只发 amd64）。改参数编辑 `/etc/starport-panel/env` 后 `systemctl restart starport-panel`；重跑脚本只升级二进制，保留 env。
 

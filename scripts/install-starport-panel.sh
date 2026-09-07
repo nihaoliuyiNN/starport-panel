@@ -19,11 +19,13 @@
 #   STARPORT_DATA_DIR          状态目录，默认 /var/lib/starport-panel
 #   STARPORT_TLS_CERT / STARPORT_TLS_KEY   可选，同时给出则 HTTP+gRPC 启用 TLS
 #   STARPORT_GRPC_ENDPOINTS    可选，下发给 agent 的 gRPC 入口（面板在 LB/NAT 后时指定）
+#   STARPORT_WITH_AGENT=1      可选，顺手把本机也装成节点（单机 / 面板机兼作 master 时用）
 #
 set -euo pipefail
 
 REPO="${STARPORT_REPO:-nihaoliuyiNN/starport-panel}"
 VERSION="${STARPORT_VERSION:-latest}"
+WITH_AGENT="${STARPORT_WITH_AGENT:-0}"
 BIN_URL="${STARPORT_PANEL_BIN_URL:-}"
 HTTP_ADDR="${STARPORT_HTTP_ADDR:-:8080}"
 GRPC_ADDR="${STARPORT_GRPC_ADDR:-:9192}"
@@ -40,6 +42,7 @@ SVC="starport-panel"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version)         VERSION="$2"; shift 2 ;;
+    --with-agent)      WITH_AGENT=1; shift ;;
     --bin-url)         BIN_URL="$2"; shift 2 ;;
     --http)            HTTP_ADDR="$2"; shift 2 ;;
     --grpc)            GRPC_ADDR="$2"; shift 2 ;;
@@ -138,6 +141,24 @@ if ! "$BIN_PATH" token list --data-dir "$DATA_DIR" 2>/dev/null | awk 'NR>1 && $N
 fi
 
 scheme=http; [[ -n "${STARPORT_TLS_CERT:-}" ]] && scheme=https
+
+# ── 可选：本机也装成节点 ───────────────────────────────────────────
+if [[ "$WITH_AGENT" == "1" ]]; then
+  port="${STARPORT_HTTP_ADDR##*:}"
+  if [[ "$VERSION" == "latest" ]]; then
+    agent_sh="https://github.com/$REPO/releases/latest/download/install-starport-agent.sh"
+  else
+    agent_sh="https://github.com/$REPO/releases/download/$VERSION/install-starport-agent.sh"
+  fi
+  echo
+  echo "[install] 本机同时装为节点（agent 连 ${scheme}://127.0.0.1:${port}）"
+  tmp="$(mktemp)"
+  dl "$agent_sh" "$tmp"
+  STARPORT_SERVER_URL="${scheme}://127.0.0.1:${port}" STARPORT_BOOTSTRAP_TOKEN="$STARPORT_BOOTSTRAP_TOKEN" \
+    STARPORT_VERSION="$VERSION" STARPORT_REPO="$REPO" bash "$tmp"
+  rm -f "$tmp"
+fi
+
 echo
 echo "[install] 完成。"
 echo "  Web UI / API : ${scheme}://<本机地址>${STARPORT_HTTP_ADDR}"

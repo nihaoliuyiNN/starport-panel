@@ -13,39 +13,25 @@ Web UI 内嵌在面板二进制里，只调公开 API；API 有 OpenAPI 描述�
 
 ## 部署
 
-需要一台跑面板的 Linux 机器（amd64），和若干台要纳管的 Linux 节点（amd64 / arm64）。节点能访问面板的 8080（注册）和 9192（gRPC）即可。
-
-**1. 装面板**
+一台 Linux（amd64）机器，root 执行：
 
 ```bash
 curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/latest/download/install-starport-panel.sh | bash
 ```
 
-装到 `/usr/local/bin`，配置写 `/etc/starport-panel/env`，注册 systemd 服务，最后打印两样东西：agent 引导令牌和第一枚 API 令牌。浏览器打开 `http://<面板>:8080`，用 API 令牌登录。
+结束时会打印一枚 API 令牌，用它登录 `http://<这台机器>:8080`。剩下的都在页面里做：
 
-要 TLS 的话在 env 里加 `STARPORT_TLS_CERT` / `STARPORT_TLS_KEY`（得是节点信得过的证书），或者前面放反向代理，但 9192 是 agent 直连的，代理得能透传 gRPC。
+- **节点** 页点「纳管节点」，把弹出的命令拷到每台要管的机器上跑一遍，几秒后上线。
+- **集群** 页新建集群，选一台在线节点做 `first-master`，看任务日志装完，再加 `join-master` / `worker`。
+- 集群详情页里是工作负载、YAML、Helm 应用、终端、用量、审计。
 
-**2. 装节点**
-
-每台节点上：
+只有一台机器？加 `STARPORT_WITH_AGENT=1`，面板机自己也装成节点，直接拿它建单机集群：
 
 ```bash
-curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/latest/download/install-starport-agent.sh | \
-  STARPORT_SERVER_URL=http://<面板>:8080 \
-  STARPORT_BOOTSTRAP_TOKEN=<上一步打印的引导令牌> bash
+curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/latest/download/install-starport-panel.sh | STARPORT_WITH_AGENT=1 bash
 ```
 
-几秒后面板「节点」页应该看到它在线。
-
-想钉版本加 `STARPORT_VERSION=v0.1.0`；想用自己编的二进制加 `STARPORT_PANEL_BIN_URL` / `STARPORT_AGENT_BIN_URL`。自己编：`make ui && make agent-linux`，面板用 `GOOS=linux go build ./cmd/starport-panel`。发版就是推 tag：`git tag v0.1.0 && git push origin v0.1.0`，Actions 负责编译和挂附件。
-
-**3. 建集群**
-
-在 UI「集群」页新建：选在线模式（节点有外网）或离线包模式（先用 `scripts/build-k8s-bundle.sh` 打包传到 http 位置，填 `bundleUrl`），然后给集群加第一台 `first-master`，装机日志在任务抽屉里滚。控制面就绪后再加 `join-master` / `worker`。
-
-之后的事——工作负载、YAML、Helm 应用、终端、用量、审计——都在集群详情页。
-
-参数、备份恢复、离线包、发版细节见 [docs/build.md](docs/build.md)；接口见 [docs/api.md](docs/api.md)。
+节点要能访问面板的 8080 和 9192；节点没外网就得先用 `scripts/build-k8s-bundle.sh` 打离线包。TLS、备份、离线包、钉版本、自己编二进制、发版（推 tag 即可）见 [docs/build.md](docs/build.md)；接口见 [docs/api.md](docs/api.md)。
 
 ## 本地开发
 

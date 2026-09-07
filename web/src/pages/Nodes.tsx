@@ -1,18 +1,30 @@
 import { useState } from 'react';
 import { App, Button, Card, Dropdown, Form, Input, InputNumber, Modal, Popover, Progress, Space, Table, Typography, Tooltip } from 'antd';
-import { CloudUploadOutlined, CodeOutlined, DeleteOutlined, MoreOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons';
+import { CloudUploadOutlined, CodeOutlined, CopyOutlined, DeleteOutlined, MoreOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
-import { errMsg, nodesApi, wsUrl, type Node } from '../api';
+import { agentsApi, errMsg, nodesApi, wsUrl, type Node } from '../api';
 import { OnlineTag } from '../components/tags';
 import TaskLogDrawer from '../components/TaskLogDrawer';
 import Terminal from '../components/Terminal';
-import { fmtBytes, fromNow } from '../util';
+import { copyText, fmtBytes, fromNow } from '../util';
 
 type UpgradeTarget = { node: Node } | { all: true } | null;
+
+const RELEASES = 'https://github.com/nihaoliuyiNN/starport-panel/releases';
+
+/** 纳管节点的一行命令：脚本与二进制都从 GitHub Release 取；面板是发行版（v*）就钉同版本 agent，dev 构建用 latest。 */
+function enrollCommand(token: string, version: string) {
+  const pinned = /^v\d/.test(version);
+  const script = pinned ? `${RELEASES}/download/${version}/install-starport-agent.sh` : `${RELEASES}/latest/download/install-starport-agent.sh`;
+  const env = [`STARPORT_SERVER_URL=${window.location.origin}`, `STARPORT_BOOTSTRAP_TOKEN=${token}`, ...(pinned ? [`STARPORT_VERSION=${version}`] : [])];
+  return `curl -fsSL ${script} | \\\n  ${env.join(' ')} bash`;
+}
 
 export default function Nodes() {
   const { message, modal } = App.useApp();
   const nodes = useQuery({ queryKey: ['nodes'], queryFn: nodesApi.list, refetchInterval: 5000 });
+  const enroll = useQuery({ queryKey: ['agents', 'enroll'], queryFn: agentsApi.enroll, staleTime: Infinity });
+  const cmd = enroll.data ? enrollCommand(enroll.data.bootstrapToken, enroll.data.version) : '';
   const [taskId, setTaskId] = useState<number | null>(null);
   const [execNode, setExecNode] = useState<Node | null>(null);
   const [termNode, setTermNode] = useState<Node | null>(null);
@@ -71,19 +83,17 @@ export default function Nodes() {
               title="纳管新节点"
               trigger="click"
               content={
-                <div style={{ maxWidth: 520 }}>
-                  <Typography.Paragraph style={{ marginBottom: 6 }}>在目标 Linux 机器上以 root 执行仓库 <code>scripts/install-starport-agent.sh</code>（引导令牌即面板 <code>--bootstrap-token</code>）：</Typography.Paragraph>
-                  <pre style={{ background: '#f6f6f6', padding: 8, borderRadius: 4, fontSize: 12, margin: 0 }}>
-{`STARPORT_SERVER_URL=${window.location.origin} \\
-STARPORT_BOOTSTRAP_TOKEN=<引导令牌> \\
-STARPORT_AGENT_BIN_URL=<starport-agent 二进制下载地址> \\
-bash install-starport-agent.sh`}
-                  </pre>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>agent 注册成功后会自动出现在此列表。详见 docs/build.md。</Typography.Text>
+                <div style={{ maxWidth: 640 }}>
+                  <Typography.Paragraph style={{ marginBottom: 6 }}>在目标 Linux 机器（amd64 / arm64）上以 root 执行，几秒后它会出现在列表里：</Typography.Paragraph>
+                  <pre style={{ background: '#f6f6f6', padding: 8, borderRadius: 4, fontSize: 12, margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{cmd || (enroll.isError ? errMsg(enroll.error) : '加载中…')}</pre>
+                  <Space style={{ marginTop: 8 }}>
+                    <Button size="small" icon={<CopyOutlined />} disabled={!cmd} onClick={async () => { if (await copyText(cmd)) message.success('已复制'); }}>复制命令</Button>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>节点需能访问本面板的 {window.location.host} 与 gRPC 端口（默认 9192）。</Typography.Text>
+                  </Space>
                 </div>
               }
             >
-              <Button>纳管节点</Button>
+              <Button type="primary" icon={<PlusOutlined />}>纳管节点</Button>
             </Popover>
             <Button icon={<CloudUploadOutlined />} onClick={() => setUpgrade({ all: true })} disabled={!nodes.data?.some((n) => n.online)}>升级全部 agent</Button>
             <Button icon={<ReloadOutlined />} onClick={() => nodes.refetch()} loading={nodes.isFetching}>刷新</Button>

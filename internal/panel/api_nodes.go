@@ -14,6 +14,16 @@ import (
 	"starport-panel/internal/panel/store"
 )
 
+// agentEnroll GET /api/v1/agents/enroll：给 UI 拼「纳管节点」一行命令所需的材料。
+// 引导令牌本来就要交给每台新节点，持有 API 令牌的管理员拿到它不算越权（单角色模型）；但它只在这一处以明文出现。
+// version 为面板自身版本：发行版是 v* tag，UI 据此钉 agent 版本；dev 构建为 "dev"，UI 退回 latest。
+func (s *Server) agentEnroll(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"bootstrapToken": s.cfg.BootstrapToken,
+		"version":        s.cfg.Version,
+	})
+}
+
 // upgradeRequest 升级 agent：从 binUrl 下载新二进制，校验 sha256（可选）后替换并重启 systemd 服务。
 type upgradeRequest struct {
 	BinURL  string   `json:"binUrl"`

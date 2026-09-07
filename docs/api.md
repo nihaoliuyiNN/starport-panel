@@ -31,6 +31,7 @@ apiserver 返回的状态错误按其原 HTTP 码透传，code 为 `K8S_<Reason>
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `POST` | `/agents/register` | agent 引导注册（Header `X-Starport-Bootstrap-Token`），非人用 |
+| `GET` | `/agents/enroll` | 纳管新节点的材料：`{"bootstrapToken","version"}`，UI 据此拼一行安装命令 |
 | `GET` | `/nodes` | 全部节点：`facts`、`agentVersion`、`online`、`lastSeenAt` |
 | `GET` | `/nodes/{id}` | 单节点 |
 | `DELETE` | `/nodes/{id}` | 删节点记录并断开连接（令牌随之失效）；仍是集群成员 `409 NODE_IN_CLUSTER`。机器上的 agent 服务需自行停掉，否则会重新注册成新节点 → `204` |
