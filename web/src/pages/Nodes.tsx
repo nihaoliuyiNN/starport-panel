@@ -12,11 +12,19 @@ type UpgradeTarget = { node: Node } | { all: true } | null;
 
 const RELEASES = 'https://github.com/nihaoliuyiNN/starport-panel/releases';
 
-/** 纳管节点的一行命令：脚本与二进制都从 GitHub Release 取；面板是发行版（v*）就钉同版本 agent，dev 构建用 latest。 */
-function enrollCommand(token: string, version: string) {
+/**
+ * 纳管节点的一行命令：脚本与二进制都从 GitHub Release 取；面板是发行版（v*）就钉同版本 agent，dev 构建用 latest。
+ * ghProxy 非空时拼在 GitHub 地址前并传给脚本（国内机器拉 Release 慢）。
+ */
+function enrollCommand(token: string, version: string, ghProxy: string) {
   const pinned = /^v\d/.test(version);
-  const script = pinned ? `${RELEASES}/download/${version}/install-starport-agent.sh` : `${RELEASES}/latest/download/install-starport-agent.sh`;
-  const env = [`STARPORT_SERVER_URL=${window.location.origin}`, `STARPORT_BOOTSTRAP_TOKEN=${token}`, ...(pinned ? [`STARPORT_VERSION=${version}`] : [])];
+  const script = ghProxy + (pinned ? `${RELEASES}/download/${version}/install-starport-agent.sh` : `${RELEASES}/latest/download/install-starport-agent.sh`);
+  const env = [
+    `STARPORT_SERVER_URL=${window.location.origin}`,
+    `STARPORT_BOOTSTRAP_TOKEN=${token}`,
+    ...(pinned ? [`STARPORT_VERSION=${version}`] : []),
+    ...(ghProxy ? [`STARPORT_GH_PROXY=${ghProxy}`] : []),
+  ];
   return `curl -fsSL ${script} | \\\n  ${env.join(' ')} bash`;
 }
 
@@ -24,7 +32,9 @@ export default function Nodes() {
   const { message, modal } = App.useApp();
   const nodes = useQuery({ queryKey: ['nodes'], queryFn: nodesApi.list, refetchInterval: 5000 });
   const enroll = useQuery({ queryKey: ['agents', 'enroll'], queryFn: agentsApi.enroll, staleTime: Infinity });
-  const cmd = enroll.data ? enrollCommand(enroll.data.bootstrapToken, enroll.data.version) : '';
+  const [ghProxy, setGhProxy] = useState('');
+  const proxyPrefix = ghProxy.trim() ? ghProxy.trim().replace(/\/?$/, '/') : '';
+  const cmd = enroll.data ? enrollCommand(enroll.data.bootstrapToken, enroll.data.version, proxyPrefix) : '';
   const [taskId, setTaskId] = useState<number | null>(null);
   const [execNode, setExecNode] = useState<Node | null>(null);
   const [termNode, setTermNode] = useState<Node | null>(null);
@@ -85,6 +95,14 @@ export default function Nodes() {
               content={
                 <div style={{ maxWidth: 640 }}>
                   <Typography.Paragraph style={{ marginBottom: 6 }}>在目标 Linux 机器（amd64 / arm64）上以 root 执行，几秒后它会出现在列表里：</Typography.Paragraph>
+                  <Input
+                    size="small"
+                    allowClear
+                    value={ghProxy}
+                    onChange={(e) => setGhProxy(e.target.value)}
+                    placeholder="GitHub 加速前缀（可选，如 https://ghfast.top/；节点在国内、拉 Release 慢时填）"
+                    style={{ marginBottom: 6 }}
+                  />
                   <pre style={{ background: '#f6f6f6', padding: 8, borderRadius: 4, fontSize: 12, margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{cmd || (enroll.isError ? errMsg(enroll.error) : '加载中…')}</pre>
                   <Space style={{ marginTop: 8 }}>
                     <Button size="small" icon={<CopyOutlined />} disabled={!cmd} onClick={async () => { if (await copyText(cmd)) message.success('已复制'); }}>复制命令</Button>

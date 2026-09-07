@@ -51,6 +51,7 @@ jobs:
           # 安装脚本转 LF（仓库在 Windows 上提交过，保险起见）
           for f in install-starport-panel.sh install-starport-agent.sh; do
             sed 's/\r$//' "scripts/${f}" > "dist/${f}"
+            bash -n "dist/${f}"   # 语法检查，别把坏脚本发出去
           done
           (cd dist && sha256sum * > SHA256SUMS)
           ls -l dist

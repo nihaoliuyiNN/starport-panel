@@ -20,10 +20,13 @@
 #   STARPORT_TLS_CERT / STARPORT_TLS_KEY   可选，同时给出则 HTTP+gRPC 启用 TLS
 #   STARPORT_GRPC_ENDPOINTS    可选，下发给 agent 的 gRPC 入口（面板在 LB/NAT 后时指定）
 #   STARPORT_WITH_AGENT=1      可选，顺手把本机也装成节点（单机 / 面板机兼作 master 时用）
+#   STARPORT_GH_PROXY          可选，GitHub 加速前缀（如 https://ghfast.top/），国内机器拉 Release 慢时用；
+#                              会拼在所有 github.com 下载地址前面，并传给 agent 安装脚本
 #
 set -euo pipefail
 
 REPO="${STARPORT_REPO:-nihaoliuyiNN/starport-panel}"
+GH_PROXY="${STARPORT_GH_PROXY:-}"
 VERSION="${STARPORT_VERSION:-latest}"
 WITH_AGENT="${STARPORT_WITH_AGENT:-0}"
 BIN_URL="${STARPORT_PANEL_BIN_URL:-}"
@@ -43,6 +46,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --version)         VERSION="$2"; shift 2 ;;
     --with-agent)      WITH_AGENT=1; shift ;;
+    --gh-proxy)        GH_PROXY="$2"; shift 2 ;;
     --bin-url)         BIN_URL="$2"; shift 2 ;;
     --http)            HTTP_ADDR="$2"; shift 2 ;;
     --grpc)            GRPC_ADDR="$2"; shift 2 ;;
@@ -62,9 +66,9 @@ if [[ -z "$BIN_URL" ]]; then
     *) echo "面板目前只发 linux/amd64 二进制（本机 $(uname -m)）；请自行编译并用 --bin-url 指定" >&2; exit 1 ;;
   esac
   if [[ "$VERSION" == "latest" ]]; then
-    BIN_URL="https://github.com/$REPO/releases/latest/download/starport-panel-linux-$arch"
+    BIN_URL="${GH_PROXY}https://github.com/$REPO/releases/latest/download/starport-panel-linux-$arch"
   else
-    BIN_URL="https://github.com/$REPO/releases/download/$VERSION/starport-panel-linux-$arch"
+    BIN_URL="${GH_PROXY}https://github.com/$REPO/releases/download/$VERSION/starport-panel-linux-$arch"
   fi
 fi
 if [[ -n "$TLS_CERT" || -n "$TLS_KEY" ]]; then
@@ -72,9 +76,9 @@ if [[ -n "$TLS_CERT" || -n "$TLS_KEY" ]]; then
   [[ -r "$TLS_CERT" && -r "$TLS_KEY" ]] || { echo "证书/私钥文件不可读" >&2; exit 1; }
 fi
 
-dl() {
-  if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
-  elif command -v wget >/dev/null 2>&1; then wget -qO "$2" "$1"
+dl() { # dl <url> <dest>：带进度条，连接超时 15s，失败重试 3 次
+  if command -v curl >/dev/null 2>&1; then curl -fL# --connect-timeout 15 --retry 3 "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then wget --show-progress -qO "$2" "$1"
   else echo "缺少 curl/wget" >&2; exit 1; fi
 }
 
@@ -146,16 +150,16 @@ scheme=http; [[ -n "${STARPORT_TLS_CERT:-}" ]] && scheme=https
 if [[ "$WITH_AGENT" == "1" ]]; then
   port="${STARPORT_HTTP_ADDR##*:}"
   if [[ "$VERSION" == "latest" ]]; then
-    agent_sh="https://github.com/$REPO/releases/latest/download/install-starport-agent.sh"
+    agent_sh="${GH_PROXY}https://github.com/$REPO/releases/latest/download/install-starport-agent.sh"
   else
-    agent_sh="https://github.com/$REPO/releases/download/$VERSION/install-starport-agent.sh"
+    agent_sh="${GH_PROXY}https://github.com/$REPO/releases/download/$VERSION/install-starport-agent.sh"
   fi
   echo
   echo "[install] 本机同时装为节点（agent 连 ${scheme}://127.0.0.1:${port}）"
   tmp="$(mktemp)"
   dl "$agent_sh" "$tmp"
   STARPORT_SERVER_URL="${scheme}://127.0.0.1:${port}" STARPORT_BOOTSTRAP_TOKEN="$STARPORT_BOOTSTRAP_TOKEN" \
-    STARPORT_VERSION="$VERSION" STARPORT_REPO="$REPO" bash "$tmp"
+    STARPORT_VERSION="$VERSION" STARPORT_REPO="$REPO" STARPORT_GH_PROXY="$GH_PROXY" bash "$tmp"
   rm -f "$tmp"
 fi
 

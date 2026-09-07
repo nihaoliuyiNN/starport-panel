@@ -20,10 +20,12 @@
 #   STARPORT_VERSION          要装的版本（Release tag），默认 latest
 #   STARPORT_AGENT_BIN_URL    二进制下载地址；默认从 GitHub Release 取 starport-agent-linux-<arch>
 #   STARPORT_DATA_DIR         身份/临时目录，默认 /var/lib/starport-agent
+#   STARPORT_GH_PROXY         可选，GitHub 加速前缀（如 https://ghfast.top/），拼在 Release 下载地址前
 #
 set -euo pipefail
 
 REPO="${STARPORT_REPO:-nihaoliuyiNN/starport-panel}"
+GH_PROXY="${STARPORT_GH_PROXY:-}"
 VERSION="${STARPORT_VERSION:-latest}"
 SERVER="${STARPORT_SERVER_URL:-}"
 TOKEN="${STARPORT_BOOTSTRAP_TOKEN:-}"
@@ -39,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --token)    TOKEN="$2"; shift 2 ;;
     --version)  VERSION="$2"; shift 2 ;;
     --bin-url)  BIN_URL="$2"; shift 2 ;;
+    --gh-proxy) GH_PROXY="$2"; shift 2 ;;
     --data-dir) DATA_DIR="$2"; shift 2 ;;
     *) echo "未知参数: $1" >&2; exit 2 ;;
   esac
@@ -55,15 +58,15 @@ if [[ -z "$BIN_URL" ]]; then
     *) echo "不支持的架构 $(uname -m)；请自行编译并用 --bin-url 指定" >&2; exit 1 ;;
   esac
   if [[ "$VERSION" == "latest" ]]; then
-    BIN_URL="https://github.com/$REPO/releases/latest/download/starport-agent-linux-$arch"
+    BIN_URL="${GH_PROXY}https://github.com/$REPO/releases/latest/download/starport-agent-linux-$arch"
   else
-    BIN_URL="https://github.com/$REPO/releases/download/$VERSION/starport-agent-linux-$arch"
+    BIN_URL="${GH_PROXY}https://github.com/$REPO/releases/download/$VERSION/starport-agent-linux-$arch"
   fi
 fi
 
-dl() { # dl <url> <dest>：优先 curl，回退 wget
-  if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
-  elif command -v wget >/dev/null 2>&1; then wget -qO "$2" "$1"
+dl() { # dl <url> <dest>：带进度条，连接超时 15s，失败重试 3 次
+  if command -v curl >/dev/null 2>&1; then curl -fL# --connect-timeout 15 --retry 3 "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then wget --show-progress -qO "$2" "$1"
   else echo "缺少 curl/wget" >&2; exit 1; fi
 }
 
