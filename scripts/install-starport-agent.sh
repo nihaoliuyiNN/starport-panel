@@ -20,7 +20,7 @@
 #   STARPORT_VERSION          要装的版本（Release tag），默认 latest
 #   STARPORT_AGENT_BIN_URL    二进制下载地址；默认从 GitHub Release 取 starport-agent-linux-<arch>
 #   STARPORT_DATA_DIR         身份/临时目录，默认 /var/lib/starport-agent
-#   STARPORT_GH_PROXY         可选，GitHub 加速前缀（如 https://ghfast.top/），拼在 Release 下载地址前
+#   STARPORT_GH_PROXY         可选，优先使用的 GitHub 加速前缀；不设也会在直连失败时自动尝试内置镜像（STARPORT_GH_MIRRORS 可覆盖）
 #
 set -euo pipefail
 
@@ -51,29 +51,54 @@ done
 [[ $EUID -eq 0 ]] || { echo "需 root 运行（starport-agent 装机阶段要写系统盘）" >&2; exit 1; }
 [[ -n "$SERVER"  ]] || { echo "缺少 --server / STARPORT_SERVER_URL" >&2; exit 1; }
 [[ -n "$TOKEN"   ]] || { echo "缺少 --token / STARPORT_BOOTSTRAP_TOKEN" >&2; exit 1; }
-if [[ -z "$BIN_URL" ]]; then
+command -v curl >/dev/null 2>&1 || { echo "需要 curl" >&2; exit 1; }
+
+# ── 下载：直连 GitHub 不通就自动换镜像（与 install-starport-panel.sh 同一套逻辑） ──
+MIRRORS="${STARPORT_GH_MIRRORS:-https://ghfast.top/ https://gh-proxy.com/ https://mirror.ghproxy.com/}"
+CURL="curl -fL --http1.1"
+gh_dl() { # gh_dl <github 直链> <dest>
+  local url="$1" dest="$2" p full
+  for p in ${GH_PROXY:+"$GH_PROXY"} "" $MIRRORS; do
+    full="${p}${url}"
+    if $CURL -s --connect-timeout 6 --max-time 10 -r 0-0 -o /dev/null "$full" 2>/dev/null; then
+      echo "[install] 下载 $full"
+      if $CURL -# --connect-timeout 10 -o "$dest" "$full"; then return 0; fi
+      echo "[install] 下载中断，换下一个源"
+    else
+      echo "[install] ${p:-直连 github.com} 连不上，换下一个源"
+    fi
+  done
+  echo "所有下载源都不可用；可自行下载二进制后用 --bin-url 指定，或设 STARPORT_GH_PROXY" >&2
+  return 1
+}
+
+mkdir -p "$(dirname "$BIN_PATH")"
+tmp="$BIN_PATH.download"
+if [[ -n "$BIN_URL" ]]; then
+  echo "[install] 下载 $BIN_URL"
+  $CURL -# --connect-timeout 10 -o "$tmp" "$BIN_URL"
+else
   case "$(uname -m)" in
     x86_64|amd64)  arch=amd64 ;;
     aarch64|arm64) arch=arm64 ;;
     *) echo "不支持的架构 $(uname -m)；请自行编译并用 --bin-url 指定" >&2; exit 1 ;;
   esac
-  if [[ "$VERSION" == "latest" ]]; then
-    BIN_URL="${GH_PROXY}https://github.com/$REPO/releases/latest/download/starport-agent-linux-$arch"
+  if [[ "$VERSION" == "latest" ]]; then REL="https://github.com/$REPO/releases/latest/download"
+  else REL="https://github.com/$REPO/releases/download/$VERSION"; fi
+  asset="starport-agent-linux-$arch"
+  gh_dl "$REL/$asset" "$tmp"
+  sums="$tmp.sums"
+  if gh_dl "$REL/SHA256SUMS" "$sums" >/dev/null 2>&1; then
+    want="$(awk -v f="$asset" '$2==f{print $1}' "$sums")"; rm -f "$sums"
+    got="$(sha256sum "$tmp" | awk '{print $1}')"
+    if [[ -n "$want" && "$want" != "$got" ]]; then
+      echo "sha256 不匹配（期望 $want，实际 $got），文件可能损坏或被篡改" >&2; rm -f "$tmp"; exit 1
+    fi
+    echo "[install] sha256 校验通过"
   else
-    BIN_URL="${GH_PROXY}https://github.com/$REPO/releases/download/$VERSION/starport-agent-linux-$arch"
+    echo "[install] 未能获取 SHA256SUMS，跳过校验"
   fi
 fi
-
-dl() { # dl <url> <dest>：带进度条，连接超时 15s，失败重试 3 次；强制 HTTP/1.1 规避劣质链路上的 HTTP/2 帧错误
-  if command -v curl >/dev/null 2>&1; then curl -fL# --http1.1 --connect-timeout 15 --retry 3 "$1" -o "$2"
-  elif command -v wget >/dev/null 2>&1; then wget --show-progress -qO "$2" "$1"
-  else echo "缺少 curl/wget" >&2; exit 1; fi
-}
-
-echo "[install] 下载 starport-agent: $BIN_URL"
-mkdir -p "$(dirname "$BIN_PATH")"
-tmp="$BIN_PATH.download"
-dl "$BIN_URL" "$tmp"
 chmod 0755 "$tmp"
 if ! "$tmp" --version >/dev/null 2>&1; then
   echo "下载的文件不是可执行的 starport-agent（$(stat -c %s "$tmp") 字节）" >&2

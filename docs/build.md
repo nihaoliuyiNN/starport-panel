@@ -65,7 +65,8 @@ curl -fsSL https://github.com/nihaoliuyiNN/starport-panel/releases/latest/downlo
 #       STARPORT_GRPC_ENDPOINTS=panel.example.com:9192 STARPORT_TLS_CERT= STARPORT_TLS_KEY=
 #       STARPORT_PANEL_BIN_URL=<自己编的二进制直链>
 #       STARPORT_WITH_AGENT=1（本机同时装成节点，单机 / 面板机兼作 master）
-#       STARPORT_GH_PROXY=https://ghfast.top/（GitHub 加速前缀，国内机器用；两份脚本都认）
+#       STARPORT_GH_PROXY=https://ghfast.top/（优先用的 GitHub 加速前缀；不设时直连失败会自动试内置镜像，
+#                                          列表可用 STARPORT_GH_MIRRORS 覆盖；下载后按 SHA256SUMS 校验）
 systemctl status starport-panel; journalctl -u starport-panel -f
 ```
 
