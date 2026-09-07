@@ -32,14 +32,29 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/nodes", s.listNodes)
 	mux.HandleFunc("GET /api/v1/nodes/{id}", s.getNode)
 	mux.HandleFunc("POST /api/v1/nodes/{id}/exec", s.execNode)
+	mux.HandleFunc("GET /api/v1/nodes/{id}/terminal", s.nodeTerminal) // WebSocket
 
 	// 集群
 	mux.HandleFunc("GET /api/v1/clusters", s.listClusters)
 	mux.HandleFunc("POST /api/v1/clusters", s.createCluster)
 	mux.HandleFunc("GET /api/v1/clusters/{id}", s.getCluster)
+	mux.HandleFunc("DELETE /api/v1/clusters/{id}", s.deleteCluster)
 	mux.HandleFunc("POST /api/v1/clusters/{id}/nodes", s.addClusterNode)
+	mux.HandleFunc("DELETE /api/v1/clusters/{id}/nodes/{nodeId}", s.removeClusterNode)
 	mux.HandleFunc("GET /api/v1/clusters/{id}/kubeconfig", s.clusterKubeconfig)
+
+	// 集群内 Kubernetes 资源（经 kubeconfig 直连 apiserver）
 	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/nodes", s.clusterK8sNodes)
+	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/namespaces", s.k8sNamespaces)
+	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/pods", s.k8sPods)
+	mux.HandleFunc("DELETE /api/v1/clusters/{id}/k8s/namespaces/{ns}/pods/{name}", s.k8sDeletePod)
+	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/namespaces/{ns}/pods/{name}/logs", s.k8sPodLogs) // 支持 ?follow=true（SSE 风格分块流）
+	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/namespaces/{ns}/pods/{name}/exec", s.k8sPodExec) // WebSocket
+	mux.HandleFunc("GET /api/v1/clusters/{id}/k8s/deployments", s.k8sDeployments)
+	mux.HandleFunc("POST /api/v1/clusters/{id}/k8s/namespaces/{ns}/deployments/{name}/scale", s.k8sScale)
+	mux.HandleFunc("POST /api/v1/clusters/{id}/k8s/namespaces/{ns}/deployments/{name}/restart", s.k8sRestart)
+	mux.HandleFunc("POST /api/v1/clusters/{id}/k8s/apply", s.k8sApply)
+	mux.HandleFunc("POST /api/v1/clusters/{id}/k8s/delete", s.k8sDeleteManifest)
 
 	// 任务
 	mux.HandleFunc("GET /api/v1/tasks", s.listTasks)
@@ -185,6 +200,42 @@ func (s *Server) addClusterNode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]uint64{"taskId": taskID})
 }
 
+// removeClusterNode 移除成员，异步任务返回 {taskId}。
+func (s *Server) removeClusterNode(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	nodeID, ok := pathID(w, r, "nodeId")
+	if !ok {
+		return
+	}
+	taskID, err := s.clusters.RemoveNode(r.Context(), id, nodeID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]uint64{"taskId": taskID})
+}
+
+// deleteCluster 删集群；?force=true 时对在线成员逐个发 reset 任务，返回 {taskIds}。
+func (s *Server) deleteCluster(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	force := r.URL.Query().Get("force") == "true"
+	taskIDs, err := s.clusters.Delete(r.Context(), id, force)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if taskIDs == nil {
+		taskIDs = []uint64{}
+	}
+	writeJSON(w, http.StatusOK, map[string][]uint64{"taskIds": taskIDs})
+}
+
 func (s *Server) clusterKubeconfig(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r, "id")
 	if !ok {
@@ -197,24 +248,6 @@ func (s *Server) clusterKubeconfig(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/yaml")
 	_, _ = io.WriteString(w, kc)
-}
-
-func (s *Server) clusterK8sNodes(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r, "id")
-	if !ok {
-		return
-	}
-	kc, err := s.clusters.Kubeconfig(r.Context(), id)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	nodes, err := s.kube.Nodes(r.Context(), id, kc)
-	if err != nil {
-		writeErr(w, &cluster.Error{Code: "APISERVER_UNREACHABLE", Message: err.Error(), Status: 502})
-		return
-	}
-	writeJSON(w, http.StatusOK, nodes)
 }
 
 // ── 任务 ─────────────────────────────────────────────────────────────────────

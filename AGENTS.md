@@ -17,8 +17,9 @@
 - `internal/panel/agenthub` — agent 连接中枢。面板任何"对节点做事"都经 `Hub.Exec / Install / OpenSession`，不得绕过。
 - `internal/panel/store` — SQLite 持久化（modernc，cgo-free）。**所有 SQL 只在此包**；schema 在 `schema.sql`，改结构走幂等 `IF NOT EXISTS` / 新增列迁移。
 - `internal/panel/task` — 异步任务执行器：`Runner.Start(kind, nodeID, clusterID, fn, onDone)`，日志逐行落库，终态回调推进上层状态。
-- `internal/panel/cluster` — 集群编排（建集群 / 加节点 / 接管凭据 / join 刷新）。依赖 `cluster.Hub` 接口而非具体 hub，便于测试。
-- `internal/panel/kube` — client-go 只读视图，clientset 按集群缓存。只有面板 import client-go，agent 二进制不受影响。
+- `internal/panel/cluster` — 集群编排（建集群 / 加节点 / 接管凭据 / join 刷新 / 移除节点 / 删集群）。依赖 `cluster.Hub` 接口而非具体 hub，便于测试；删集群后经 `OnDeleted` 通知 kube 丢缓存。
+- `internal/panel/kube` — client-go 直连 apiserver：`kube.go` 客户端缓存（按 kubeconfig 哈希，clientset + dynamic + discovery），`workloads.go` 列表与扩缩 / 重启 / 删 Pod / 日志流，`exec.go` 容器 exec（WebSocket 优先回落 SPDY），`apply.go` server-side apply / delete。只有面板 import client-go，agent 二进制不受影响。
+- `internal/panel/terminal.go` / `api_kube.go` — WebSocket 桥接（节点 PTY、容器 exec）与 k8s 资源 HTTP 处理器。终端协议：二进制帧=字节流，文本帧=控制 JSON（`resize` / `exit`），两处一致，不要各造一套。
 - `internal/agent` — agent 运行时（`conn.go` 流、`exec.go` 串行执行、`stream.go` PTY 会话、`state.go` 身份）。
 - `internal/installer` — 装机引擎。**只依赖标准库与系统命令**，不 import 本仓库其它包（agent 以类型别名复用其类型）。
 - `internal/pb/agentv1` — 生成代码，**禁止手改**；改 `proto/` 后 `make proto`。

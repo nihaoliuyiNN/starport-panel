@@ -14,7 +14,11 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/discovery/cached/memory"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -43,7 +47,10 @@ type Client struct {
 
 type cached struct {
 	hash string
+	cfg  *rest.Config
 	cs   *kubernetes.Clientset
+	dyn  *dynamic.DynamicClient
+	disc discovery.CachedDiscoveryInterface
 }
 
 // New 建客户端缓存。
@@ -77,25 +84,48 @@ func (c *Client) Forget(clusterID uint64) {
 }
 
 func (c *Client) clientset(clusterID uint64, kubeconfig string) (*kubernetes.Clientset, error) {
+	e, err := c.entry(clusterID, kubeconfig)
+	if err != nil {
+		return nil, err
+	}
+	return e.cs, nil
+}
+
+func (c *Client) restConfig(clusterID uint64, kubeconfig string) (*rest.Config, error) {
+	e, err := c.entry(clusterID, kubeconfig)
+	if err != nil {
+		return nil, err
+	}
+	return e.cfg, nil
+}
+
+// entry 取（或按 kubeconfig 内容哈希重建）某集群的客户端组。
+func (c *Client) entry(clusterID uint64, kubeconfig string) (cached, error) {
 	sum := sha256.Sum256([]byte(kubeconfig))
 	hash := hex.EncodeToString(sum[:])
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e, ok := c.cache[clusterID]; ok && e.hash == hash {
-		return e.cs, nil
+		return e, nil
 	}
 	cfg, err := clientcmd.RESTConfigFromKubeConfig([]byte(kubeconfig))
 	if err != nil {
-		return nil, fmt.Errorf("kube: 解析 kubeconfig: %w", err)
+		return cached{}, fmt.Errorf("kube: 解析 kubeconfig: %w", err)
 	}
-	cfg.Timeout = 15 * time.Second
+	// 不设全局 Timeout：日志 follow / exec 是长流，由各调用的 ctx 控制
 	cfg.UserAgent = "starport-panel"
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("kube: 建客户端: %w", err)
+		return cached{}, fmt.Errorf("kube: 建客户端: %w", err)
 	}
-	c.cache[clusterID] = cached{hash: hash, cs: cs}
-	return cs, nil
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return cached{}, fmt.Errorf("kube: 建 dynamic 客户端: %w", err)
+	}
+	disc := memory.NewMemCacheClient(cs.Discovery())
+	e := cached{hash: hash, cfg: cfg, cs: cs, dyn: dyn, disc: disc}
+	c.cache[clusterID] = e
+	return e, nil
 }
 
 func toInfo(n *corev1.Node) NodeInfo {

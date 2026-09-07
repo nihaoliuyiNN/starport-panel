@@ -52,9 +52,10 @@ const (
 
 // Service 见包注释。
 type Service struct {
-	store *store.Store
-	hub   Hub
-	tasks *task.Runner
+	store     *store.Store
+	hub       Hub
+	tasks     *task.Runner
+	onDeleted func(clusterID uint64)
 }
 
 // New 建服务。

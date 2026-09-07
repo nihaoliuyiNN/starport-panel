@@ -21,6 +21,7 @@ const (
 	MemberInstalling = "installing"
 	MemberReady      = "ready"
 	MemberFailed     = "failed"
+	MemberRemoving   = "removing"
 )
 
 // Cluster 集群记录。凭据类字段不序列化到 JSON。
@@ -222,6 +223,24 @@ func (s *Store) GetMember(ctx context.Context, clusterID, nodeID uint64) (Member
 	}
 	m.UpdatedAt = parseTS(upd)
 	return m, err
+}
+
+// DeleteMember 删除成员记录（节点移出集群后）。
+func (s *Store) DeleteMember(ctx context.Context, clusterID, nodeID uint64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM cluster_nodes WHERE cluster_id = ? AND node_id = ?`, clusterID, nodeID)
+	return err
+}
+
+// DeleteCluster 删除集群及其成员记录（外键级联）；任务记录保留供审计。
+func (s *Store) DeleteCluster(ctx context.Context, id uint64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM clusters WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // NodeMemberships 某节点所属的全部集群成员记录（一台机只能属于一个集群，用于加入前校验）。

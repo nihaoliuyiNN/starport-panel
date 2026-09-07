@@ -11,6 +11,8 @@ import (
 const (
 	TaskInstall = "install"
 	TaskExec    = "exec"
+	TaskRemove  = "remove"  // 节点移出集群（drain + kubeadm reset）
+	TaskDestroy = "destroy" // 删集群时逐节点 reset
 
 	TaskRunning   = "running"
 	TaskSucceeded = "succeeded"

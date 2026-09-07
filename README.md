@@ -8,7 +8,7 @@
 - **结构化装机**：面板下发的是结构化 `InstallSpec`，不是一坨脚本；预检 / 阶段 / 失败码都是数据，可重试、可断点。
 - **契约先行**：面板 ↔ agent 走 gRPC 双向流，`.proto` 是唯一事实来源。
 
-> 当前状态：**Phase 1 —— 节点纳管 + 装集群**。应用管理、Web UI 见下方路线图。
+> 当前状态：**Phase 2 —— 集群生命周期 + 工作负载管理（API 层）**。Helm、Web UI 见下方路线图。
 
 ## 组成
 
@@ -19,9 +19,9 @@
 | `internal/panel` | 面板装配层（HTTP 路由、gRPC 服务端） |
 | `internal/panel/agenthub` | agent 连接中枢：连接表、请求关联、会话路由、注册端点 |
 | `internal/panel/store` | SQLite 持久化：节点、集群、成员、任务与日志 |
-| `internal/panel/cluster` | 集群编排：首 master init → 接管 kubeconfig / join 凭据 → master/worker 加入 |
+| `internal/panel/cluster` | 集群编排：首 master init → 接管 kubeconfig / join 凭据 → master/worker 加入 → 节点移除 / 删集群 |
 | `internal/panel/task` | 异步任务执行器：日志落库、取消、终态回调 |
-| `internal/panel/kube` | client-go 直连 apiserver 的只读视图 |
+| `internal/panel/kube` | client-go 直连 apiserver：节点 / 命名空间 / Pod / Deployment 视图，扩缩、重启、删 Pod，日志流，容器 exec，server-side apply |
 | `internal/agent` | agent 运行时：呼出长连、串行执行队列、幂等、PTY 会话 |
 | `internal/installer` | Kubernetes 装机引擎（自洽，只依赖标准库与系统命令） |
 | `internal/pb/agentv1` | 由 `proto/` 生成的 Go 代码（入库） |
@@ -49,6 +49,18 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/clusters/1/nodes -d '{"nodeId":1,"r
 curl -s -X POST http://127.0.0.1:8080/api/v1/clusters/1/nodes -d '{"nodeId":2,"role":"worker"}'
 curl -s http://127.0.0.1:8080/api/v1/clusters/1/kubeconfig
 curl -s http://127.0.0.1:8080/api/v1/clusters/1/k8s/nodes
+
+# 5. 管工作负载：apply YAML、看 Pod、拉日志、扩缩；节点 / 容器 Web 终端走 WebSocket
+curl -s -X POST -H 'Content-Type: application/yaml' --data-binary @nginx.yaml http://127.0.0.1:8080/api/v1/clusters/1/k8s/apply
+curl -s 'http://127.0.0.1:8080/api/v1/clusters/1/k8s/pods?namespace=default'
+curl -s 'http://127.0.0.1:8080/api/v1/clusters/1/k8s/namespaces/default/pods/nginx-xxx/logs?tail=100'
+curl -s -X POST http://127.0.0.1:8080/api/v1/clusters/1/k8s/namespaces/default/deployments/nginx/scale -d '{"replicas":3}'
+#   ws://127.0.0.1:8080/api/v1/nodes/1/terminal        节点终端（xterm.js 直连）
+#   ws://127.0.0.1:8080/api/v1/clusters/1/k8s/namespaces/default/pods/nginx-xxx/exec   容器终端
+
+# 6. 收尾：移除节点 / 删集群
+curl -s -X DELETE http://127.0.0.1:8080/api/v1/clusters/1/nodes/2      # drain + delete node + kubeadm reset → taskId
+curl -s -X DELETE 'http://127.0.0.1:8080/api/v1/clusters/1?force=true'  # 全部在线节点 reset 后删记录
 ```
 
 生产节点安装：`scripts/install-starport-agent.sh`（systemd 常驻，见 `docs/build.md`）。完整 API 见 [docs/api.md](docs/api.md)。
@@ -77,8 +89,8 @@ agent 只做出站连接；面板沿同一条流反向下发 `exec` / `install` 
 
 - [x] Phase 0：仓库骨架、agent ↔ 面板 gRPC 链路、节点注册/在线/exec
 - [x] Phase 1：SQLite 持久化、装集群编排（首 master → join，join 凭据自动刷新）、kubeconfig 接管、client-go 节点视图、异步任务与日志
-- [ ] Phase 2：应用管理（部署 / 扩缩 / 暴露 / Helm）、Web 终端与日志（经 apiserver）、Web UI、集群删除/节点移除
-- [ ] Phase 3：`panel/v1` 公开 API 定稿（gRPC + REST/OpenAPI）、API Token、多面板对接
+- [x] Phase 2：节点移除 / 删集群、节点 Web 终端、工作负载视图（命名空间 / Pod / Deployment）、扩缩 / 重启 / 删 Pod、Pod 日志流、容器 exec、server-side apply
+- [ ] Phase 3：Web UI（React）、Helm 应用市场、Service / Ingress 暴露、`panel/v1` 公开 API 定稿（REST/OpenAPI）、API Token、多面板对接
 
 ## 开发
 

@@ -24,12 +24,25 @@ type fakeHub struct {
 	specs    []*pb.InstallSpec
 	install  func(spec *pb.InstallSpec) agenthub.Result
 	execLine string // Exec 时回放的 marker 行
+	execs    []execCall
+	exec     func(nodeID uint64, script string) agenthub.Result // 为 nil 时一律成功
+}
+
+type execCall struct {
+	nodeID uint64
+	script string
 }
 
 func (f *fakeHub) Online(id uint64) bool { return f.online[id] }
 
-func (f *fakeHub) Exec(_ context.Context, _ uint64, _ string, _ time.Duration, onLog func(string)) (agenthub.Result, error) {
+func (f *fakeHub) Exec(_ context.Context, nodeID uint64, script string, _ time.Duration, onLog func(string)) (agenthub.Result, error) {
+	f.mu.Lock()
+	f.execs = append(f.execs, execCall{nodeID, script})
+	f.mu.Unlock()
 	onLog(f.execLine)
+	if f.exec != nil {
+		return f.exec(nodeID, script), nil
+	}
 	return agenthub.Result{OK: true}, nil
 }
 

@@ -74,7 +74,9 @@ func New(cfg Config) (*Server, error) {
 		clusters: cluster.New(st, hub, tasks),
 		kube:     kube.New(),
 	}
+	s.clusters.OnDeleted(s.kube.Forget)
 
+	// WebSocket 长连接（终端 / 日志 / exec）不能有写超时；HTTP 服务器只限制请求头读取
 	s.http = &http.Server{Addr: cfg.HTTPAddr, Handler: s.routes(), ReadHeaderTimeout: 10 * time.Second}
 	s.grpc = grpc.NewServer(agenthub.ServerOptions()...)
 	pb.RegisterNodeAgentServiceServer(s.grpc, hub)
