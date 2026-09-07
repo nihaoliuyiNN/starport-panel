@@ -23,12 +23,13 @@ make panel                                   # dist/starport-panel
 |---|---|---|---|
 | `--http` | `STARPORT_HTTP_ADDR` | `:8080` | API / UI / agent 注册 |
 | `--grpc` | `STARPORT_GRPC_ADDR` | `:9192` | agent 呼出长连入口 |
+| `--data-dir` | `STARPORT_DATA_DIR` | Linux `/var/lib/starport-panel`，其它 `./data` | 状态目录：SQLite `panel.db`（WAL） |
 | `--bootstrap-token` | `STARPORT_BOOTSTRAP_TOKEN` | 必填 | agent 引导注册令牌 |
 | `--grpc-endpoints` | `STARPORT_GRPC_ENDPOINTS` | 按注册请求的主机推导 | 下发给 agent 的 gRPC 入口（面板在 LB/NAT 后时显式指定） |
 
-两个端口都要对节点可达：8080 用于注册，9192 用于长连。
+两个端口都要对节点可达：8080 用于注册，9192 用于长连。面板还需能访问集群 apiserver（`controlPlaneEndpoint`）以提供 `k8s/nodes` 视图。
 
-> Phase 0 节点状态在内存里，面板重启后 agent 会因令牌失效自动重注册。Phase 1 换 SQLite 持久化。
+状态全部在 `panel.db` 一个文件里（节点凭据、集群 kubeconfig / join 凭据、任务日志），备份即拷贝该文件（WAL 模式下连同 `-wal` 一起）。API 见 [api.md](api.md)。
 
 ---
 
@@ -205,10 +206,11 @@ InstallSpec 里的 add-on **必须**是离线包 `--addons` 已打进去的，�
 ## 4. 本地联调
 
 ```bash
-go run ./cmd/starport-panel serve --bootstrap-token dev
+go run ./cmd/starport-panel serve --bootstrap-token dev --data-dir /tmp/sp-panel
 go run ./cmd/starport-agent --server http://127.0.0.1:8080 --token dev --data-dir /tmp/sp-agent
 curl -s http://127.0.0.1:8080/api/v1/nodes
-curl -s -X POST http://127.0.0.1:8080/api/v1/nodes/1/exec -d '{"script":"uname -a"}'
+curl -s -X POST http://127.0.0.1:8080/api/v1/nodes/1/exec -d '{"script":"uname -a"}'   # → {"taskId":1}
+curl -s http://127.0.0.1:8080/api/v1/tasks/1/logs
 ```
 
 非 Linux 机器上 agent 能注册/连接，但 exec 会因无 `/bin/bash` 失败——链路验证足够，真实装机请用 Linux 节点。

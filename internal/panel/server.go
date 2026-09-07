@@ -1,24 +1,23 @@
-// Package panel 是 starport-panel 控制面的装配层：HTTP API + agent gRPC 中枢。
-//
-// Phase 0 只有节点纳管所需的最小面：注册、节点列表、在节点上执行脚本（联调/排障用）。
-// 集群生命周期、应用管理、Web UI 在后续阶段进入本包。
+// Package panel 是 starport-panel 控制面的装配层：SQLite 存储、agent gRPC 中枢、任务执行器、
+// 集群编排与 HTTP API 在此拼装；业务逻辑在各子包。
 package panel
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net"
 	"net/http"
-	"strconv"
-	"strings"
+	"path/filepath"
 	"time"
 
 	"google.golang.org/grpc"
 
 	"starport-panel/internal/panel/agenthub"
+	"starport-panel/internal/panel/cluster"
+	"starport-panel/internal/panel/kube"
+	"starport-panel/internal/panel/store"
+	"starport-panel/internal/panel/task"
 	pb "starport-panel/internal/pb/agentv1"
 )
 
@@ -26,6 +25,7 @@ import (
 type Config struct {
 	HTTPAddr       string // 如 :8080
 	GrpcAddr       string // 如 :9192
+	DataDir        string // SQLite 等状态目录
 	BootstrapToken string
 	GrpcEndpoints  []string // 下发给 agent 的入口；空则按注册请求 Host 推导
 	Version        string
@@ -33,41 +33,57 @@ type Config struct {
 
 // Server 面板进程。
 type Server struct {
-	cfg   Config
-	store *agenthub.MemoryStore
-	hub   *agenthub.Hub
-	http  *http.Server
-	grpc  *grpc.Server
+	cfg      Config
+	store    *store.Store
+	hub      *agenthub.Hub
+	tasks    *task.Runner
+	clusters *cluster.Service
+	kube     *kube.Client
+	http     *http.Server
+	grpc     *grpc.Server
 }
 
-// New 装配。
-func New(cfg Config) *Server {
-	store := agenthub.NewMemoryStore()
+// New 装配（打开数据库、建各子系统、注册路由）。
+func New(cfg Config) (*Server, error) {
+	st, err := store.Open(filepath.Join(cfg.DataDir, "panel.db"))
+	if err != nil {
+		return nil, err
+	}
+	// 新进程还没有任何连接：上次留下的在线标记与 running 任务全部作废
+	if err := st.MarkAllOffline(); err != nil {
+		return nil, err
+	}
+	if n, err := st.FailRunningTasks(context.Background()); err != nil {
+		return nil, err
+	} else if n > 0 {
+		log.Printf("[panel] 上次进程遗留 %d 个运行中任务已标记失败", n)
+	}
+
 	_, grpcPort, _ := net.SplitHostPort(cfg.GrpcAddr)
-	hub := agenthub.New(store, agenthub.Options{
+	hub := agenthub.New(st, agenthub.Options{
 		BootstrapToken: cfg.BootstrapToken,
 		GrpcEndpoints:  cfg.GrpcEndpoints,
 		GrpcPort:       grpcPort,
 	})
-	s := &Server{cfg: cfg, store: store, hub: hub}
+	tasks := task.New(st)
+	s := &Server{
+		cfg:      cfg,
+		store:    st,
+		hub:      hub,
+		tasks:    tasks,
+		clusters: cluster.New(st, hub, tasks),
+		kube:     kube.New(),
+	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") })
-	mux.HandleFunc("GET /api/v1/version", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]string{"version": cfg.Version})
-	})
-	mux.Handle("POST "+agenthub.RegisterPath, hub.RegisterHandler())
-	mux.HandleFunc("GET /api/v1/nodes", s.listNodes)
-	mux.HandleFunc("POST /api/v1/nodes/{id}/exec", s.execNode)
-
-	s.http = &http.Server{Addr: cfg.HTTPAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	s.http = &http.Server{Addr: cfg.HTTPAddr, Handler: s.routes(), ReadHeaderTimeout: 10 * time.Second}
 	s.grpc = grpc.NewServer(agenthub.ServerOptions()...)
 	pb.RegisterNodeAgentServiceServer(s.grpc, hub)
-	return s
+	return s, nil
 }
 
 // Run 启动 HTTP 与 gRPC，阻塞到 ctx 取消后优雅停机。
 func (s *Server) Run(ctx context.Context) error {
+	defer s.store.Close()
 	lis, err := net.Listen("tcp", s.cfg.GrpcAddr)
 	if err != nil {
 		return err
@@ -78,7 +94,7 @@ func (s *Server) Run(ctx context.Context) error {
 		errCh <- s.grpc.Serve(lis)
 	}()
 	go func() {
-		log.Printf("[panel] HTTP 监听 %s", s.cfg.HTTPAddr)
+		log.Printf("[panel] HTTP 监听 %s，数据目录 %s", s.cfg.HTTPAddr, s.cfg.DataDir)
 		if err := s.http.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -94,55 +110,4 @@ func (s *Server) Run(ctx context.Context) error {
 	_ = s.http.Shutdown(shutdownCtx)
 	s.grpc.GracefulStop()
 	return ctx.Err()
-}
-
-// Hub 暴露给上层业务（装机编排等）。
-func (s *Server) Hub() *agenthub.Hub { return s.hub }
-
-func (s *Server) listNodes(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, s.store.List())
-}
-
-// execNode 在节点上跑脚本，日志按行流式回写（text/plain），最后一行是终态 JSON。
-// 联调/排障用；正式的任务接口在后续阶段做成异步任务 + 日志拉取。
-func (s *Server) execNode(w http.ResponseWriter, r *http.Request) {
-	nodeID, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
-	if err != nil {
-		http.Error(w, "非法节点 ID", http.StatusBadRequest)
-		return
-	}
-	var req struct {
-		Script    string `json:"script"`
-		TimeoutMs int64  `json:"timeoutMs"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil || strings.TrimSpace(req.Script) == "" {
-		http.Error(w, "缺少 script", http.StatusBadRequest)
-		return
-	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	flusher, _ := w.(http.Flusher)
-	onLog := func(line string) {
-		_, _ = io.WriteString(w, line+"\n")
-		if flusher != nil {
-			flusher.Flush()
-		}
-	}
-	res, err := s.hub.Exec(r.Context(), nodeID, req.Script, time.Duration(req.TimeoutMs)*time.Millisecond, onLog)
-	if err != nil {
-		if errors.Is(err, agenthub.ErrNodeOffline) {
-			// 头已可能发出，只能在正文里报
-			onLog(`{"error":"节点离线"}`)
-			return
-		}
-		onLog(`{"error":"` + err.Error() + `"}`)
-		return
-	}
-	b, _ := json.Marshal(map[string]any{"ok": res.OK, "exitCode": res.ExitCode, "error": res.Err})
-	onLog(string(b))
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
 }

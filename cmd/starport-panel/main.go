@@ -17,6 +17,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -48,6 +49,7 @@ func serve(args []string) {
 	var endpoints string
 	fs.StringVar(&cfg.HTTPAddr, "http", env("STARPORT_HTTP_ADDR", ":8080"), "HTTP 监听地址（API / UI / agent 注册）")
 	fs.StringVar(&cfg.GrpcAddr, "grpc", env("STARPORT_GRPC_ADDR", ":9192"), "gRPC 监听地址（agent 呼出长连）")
+	fs.StringVar(&cfg.DataDir, "data-dir", env("STARPORT_DATA_DIR", defaultDataDir()), "状态目录（SQLite 数据库等）")
 	fs.StringVar(&cfg.BootstrapToken, "bootstrap-token", env("STARPORT_BOOTSTRAP_TOKEN", ""), "agent 引导注册令牌（必填）")
 	fs.StringVar(&endpoints, "grpc-endpoints", env("STARPORT_GRPC_ENDPOINTS", ""), "下发给 agent 的 gRPC 入口（逗号分隔 host:port）；空则按注册请求的主机推导")
 	_ = fs.Parse(args)
@@ -66,7 +68,11 @@ func serve(args []string) {
 	defer stop()
 
 	log.Printf("starport-panel %s 启动", version)
-	if err := panel.New(cfg).Run(ctx); err != nil && err != context.Canceled {
+	srv, err := panel.New(cfg)
+	if err != nil {
+		log.Fatalf("starport-panel 初始化失败: %v", err)
+	}
+	if err := srv.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("starport-panel 退出: %v", err)
 	}
 	log.Printf("starport-panel 已停止")
@@ -74,6 +80,14 @@ func serve(args []string) {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "用法: starport-panel <serve|version> [flags]")
+}
+
+// defaultDataDir Linux 服务器用 /var/lib；其它平台（开发机）用当前目录下的 data/。
+func defaultDataDir() string {
+	if runtime.GOOS == "linux" {
+		return "/var/lib/starport-panel"
+	}
+	return "data"
 }
 
 func env(key, def string) string {

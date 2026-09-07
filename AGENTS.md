@@ -13,8 +13,12 @@
 
 - `cmd/starport-panel` — 控制面进程，子命令 `serve` / `version`。
 - `cmd/starport-agent` — 节点侧代理（Linux 生产；其它平台仅可编译）。
-- `internal/panel` — 装配层：HTTP 路由、gRPC 服务端、优雅停机。业务编排后续在此包下分子包（`cluster/`、`app/`…）。
+- `internal/panel` — 装配层：`server.go` 拼装子系统，`api.go` HTTP 路由与统一错误映射。业务不写在这里。
 - `internal/panel/agenthub` — agent 连接中枢。面板任何"对节点做事"都经 `Hub.Exec / Install / OpenSession`，不得绕过。
+- `internal/panel/store` — SQLite 持久化（modernc，cgo-free）。**所有 SQL 只在此包**；schema 在 `schema.sql`，改结构走幂等 `IF NOT EXISTS` / 新增列迁移。
+- `internal/panel/task` — 异步任务执行器：`Runner.Start(kind, nodeID, clusterID, fn, onDone)`，日志逐行落库，终态回调推进上层状态。
+- `internal/panel/cluster` — 集群编排（建集群 / 加节点 / 接管凭据 / join 刷新）。依赖 `cluster.Hub` 接口而非具体 hub，便于测试。
+- `internal/panel/kube` — client-go 只读视图，clientset 按集群缓存。只有面板 import client-go，agent 二进制不受影响。
 - `internal/agent` — agent 运行时（`conn.go` 流、`exec.go` 串行执行、`stream.go` PTY 会话、`state.go` 身份）。
 - `internal/installer` — 装机引擎。**只依赖标准库与系统命令**，不 import 本仓库其它包（agent 以类型别名复用其类型）。
 - `internal/pb/agentv1` — 生成代码，**禁止手改**；改 `proto/` 后 `make proto`。
@@ -33,7 +37,8 @@
 - 注释与日志中文；日志前缀 `[panel]` / `[agenthub]` / `[agent]`。
 - 并发：gRPC 流 `Send` 不可并发——每条连接一个 writer goroutine + channel 汇聚，不要在别处直接 `Send`。
 - 面板 HTTP 用标准库 `net/http` `ServeMux`（Go 1.22+ 方法/路径模式），不引路由框架。
-- 存储经接口（如 `agenthub.Store`）注入；Phase 1 起默认 SQLite（cgo-free 驱动），保持单二进制。
+- 存储：SQLite 单文件（`store` 包），保持单二进制；子系统对存储的依赖用小接口声明在消费方（如 `agenthub.Store`）。
+- HTTP 错误：业务错误用 `cluster.Error{Code, Message, Status}`，`api.go` 的 `writeErr` 统一映射；`store.ErrNotFound` → 404。
 - 不为"以后可能用到"加抽象；不做的功能不留空壳。
 
 ## 常用命令

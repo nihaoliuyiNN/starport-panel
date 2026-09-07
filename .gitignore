@@ -5,6 +5,12 @@
 *.log
 *.err
 
+# 面板本地状态（--data-dir 非 Linux 默认值）
+/data/
+*.db
+*.db-wal
+*.db-shm
+
 # 离线装机包（数百 MB，走 Release 附件 / 对象存储，不入库）
 /scripts/dist/
 *.tar.gz
